@@ -1,0 +1,67 @@
+/** Звук на карточке архива: короткое прослушивание песни дня (файл или синтез). Одновременно — только одна карточка. */
+import { create } from 'zustand';
+import type { Memory } from '../lib/types';
+import { hashString } from '../lib/util';
+import { getBlob } from './db';
+import { SynthEngine } from './synth';
+
+interface PreviewState {
+  playingId: string | null;
+  toggle: (m: Memory) => Promise<void>;
+  stop: () => void;
+}
+
+let el: HTMLAudioElement | null = null;
+let url: string | null = null;
+let ctx: AudioContext | null = null;
+let synth: SynthEngine | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
+
+function cleanup() {
+  if (timer) clearTimeout(timer);
+  timer = null;
+  el?.pause();
+  el = null;
+  if (url) URL.revokeObjectURL(url);
+  url = null;
+  synth?.stop();
+  synth = null;
+}
+
+export const usePreviewSound = create<PreviewState>()((set, get) => ({
+  playingId: null,
+  stop: () => {
+    cleanup();
+    set({ playingId: null });
+  },
+  toggle: async (m) => {
+    const was = get().playingId;
+    cleanup();
+    if (was === m.id) {
+      set({ playingId: null });
+      return;
+    }
+    set({ playingId: m.id });
+    const blob = m.song?.source === 'file' && m.song.fileBlobId ? await getBlob(m.song.fileBlobId) : null;
+    if (blob) {
+      url = URL.createObjectURL(blob);
+      el = new Audio(url);
+      el.volume = 0.8;
+      el.onended = () => get().stop();
+      await el.play().catch(() => get().stop());
+    } else {
+      ctx = ctx ?? new AudioContext();
+      if (ctx.state === 'suspended') await ctx.resume();
+      const p = m.generation.song;
+      synth = new SynthEngine(ctx, ctx.destination, {
+        bpm: p?.bpm ?? Math.round(60000 / m.generation.beatMs),
+        energy: p?.energy ?? 0.4,
+        scale: p?.scale ?? 'minor',
+        texture: p?.texture ?? 'ambient',
+        seed: hashString(m.generation.inputHash),
+      });
+      synth.start(0);
+    }
+    timer = setTimeout(() => get().stop(), 20000);
+  },
+}));
