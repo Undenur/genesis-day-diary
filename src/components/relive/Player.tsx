@@ -3,13 +3,14 @@
  * Оригинал / Арт-версия без потери позиции, музыка и голос с раздельной громкостью.
  */
 import {
-  AudioLines, ChevronLeft, ChevronRight, Contrast, EighthNotes, ExternalLink, Images, Mic, Palette, Pause, Play, Speech, Square, Volume2, VolumeX, X,
+  ChevronLeft, ChevronRight, Contrast, EighthNotes, ExternalLink, Images, Mic, Palette, Pause, Play, Speech, Square, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useBlobUrl, useBlobUrls } from '../../hooks/useBlobUrl';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import type { Generation, MemoryInput } from '../../lib/types';
 import { stopAllAudio } from '../../services/audioOwner';
+import { resolveMusic } from '../../services/musicSource';
 import { speak, stopSpeaking } from '../../services/speech';
 import { StoryAudio, type AudioStatus } from '../../services/storyAudio';
 import { useSettings } from '../../store/settings';
@@ -62,22 +63,22 @@ export function Player({ input, generation: g, onClose, actions, side, autoplay,
   }, []);
 
   // Аудио пересоздаётся при смене файлов; закрывается при выходе.
-  const fileReady = input.song?.source !== 'file' || !input.song.fileBlobId || fileUrl;
+  // Тот же выбор источника, что в редакторе и на карточке архива (просмотр не меняет запись).
+  const music = useMemo(() => resolveMusic(input.song, input.mood, input.text), [input.song, input.mood, input.text]);
+  const fileReady = music.kind !== 'file' || fileUrl;
   const voiceReady = !input.voice || voiceUrl;
   useEffect(() => {
     if (!fileReady || !voiceReady) return;
     const a = new StoryAudio({
-      song: input.song,
-      profile: g.song,
+      music,
       fileUrl,
       voiceUrl,
-      fallbackBpm: Math.round(60000 / g.beatMs),
-      seedText: g.inputHash,
       getPositionMs: () => clock.current,
       onPreempt: () => setPlaying(false),
     });
     a.setVolumes(musicVolume, voiceVolume);
     a.onVoiceEnd = () => setVoicePlaying(false);
+    a.onStatus = (s) => audioRef.current === a && setStatus(s);
     audioRef.current = a;
     setStatus(a.status);
     a.prepare().then((s) => audioRef.current === a && setStatus({ ...s }));
@@ -89,7 +90,7 @@ export function Player({ input, generation: g, onClose, actions, side, autoplay,
       setVoicePlaying(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileUrl, voiceUrl, fileReady, voiceReady, g.inputHash]);
+  }, [fileUrl, voiceUrl, fileReady, voiceReady, music]);
 
   useEffect(() => {
     audioRef.current?.setVolumes(musicVolume, voiceVolume);
@@ -290,8 +291,8 @@ export function Player({ input, generation: g, onClose, actions, side, autoplay,
         {/* Нижняя панель управления — доступна одной рукой */}
         <div className="safe-bottom bg-night px-3 pt-2">
           <div className="flex items-center gap-1.5 overflow-x-auto px-1 pb-1 text-[12px] text-muted no-scrollbar">
-            <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 ${status?.mode === 'file' || status?.mode === 'link' ? 'bg-ok/15 text-ok' : 'bg-raised text-ink'}`}>
-              {status?.mode === 'file' || status?.mode === 'link' ? <EighthNotes size={14} aria-hidden="true" /> : <AudioLines size={14} aria-hidden="true" />}
+            <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 ${status?.note ? 'bg-warn/15 text-warn' : 'bg-ok/15 text-ok'}`}>
+              <EighthNotes size={14} aria-hidden="true" />
               {status?.label ?? 'Готовлю звук…'}
             </span>
             {reduced && <span className="shrink-0 rounded-full bg-raised px-2.5 py-1 text-ink">Reduced Motion · ручной просмотр</span>}
@@ -324,7 +325,7 @@ export function Player({ input, generation: g, onClose, actions, side, autoplay,
       <Sheet open={sound} onClose={() => setSound(false)} title="Звук">
         <div className="flex flex-col gap-5">
           <div className="rounded-2xl bg-night p-4 text-[14px]">
-            <p className="font-semibold">{status?.mode === 'synth' ? 'Сейчас: синтез MOMENTA' : 'Сейчас: оригинальный трек'}</p>
+            <p className="font-semibold">{status?.mode === 'catalog' ? 'Сейчас: композиция подборки' : status?.mode === 'link' ? 'Сейчас: трек по ссылке' : 'Сейчас: ваш трек'}</p>
             <p className="mt-1 text-muted">{status?.label}</p>
             {status?.note && <p className="mt-2 text-warn">{status.note}</p>}
             {status?.serviceUrl && (

@@ -146,3 +146,39 @@ describe('причины атмосферы', () => {
     expect(g.reasons![0].text).toContain(s);
   });
 });
+
+describe('настроение автора и звучащий трек — разные источники', () => {
+  const mid = (g: ReturnType<typeof generateRelive>) => g.scenes.filter((s) => s.kind === 'middle').flatMap((s) => s.shots);
+
+  it('«Нежность» + быстрый трек: камерная подача и быстрый монтаж сосуществуют', () => {
+    const tender = generateRelive(base({ mood: 'tender', song: electro, songLabel: '«Пульс»' }));
+    const drive = generateRelive(base({ mood: 'drive', song: electro, songLabel: '«Пульс»' }));
+    const slow = generateRelive(base({ mood: 'tender' }));
+    expect(tender.reasons![0].kind).toBe('mood');
+    expect(tender.reasons![0].text).toContain('Нежность');
+    expect(tender.explanations.some((e) => e.text.includes('сосуществуют'))).toBe(true);
+    // Камерность — от настроения: Intimacy выше, чем у «Драйва» с тем же треком.
+    expect(tender.params.intimacy).toBeGreaterThan(drive.params.intimacy);
+    // Темп монтажа — от трека: настроение его не замедляет.
+    expect(tender.params.energy).toBe(drive.params.energy);
+    expect(mid(tender).length).toBeGreaterThan(mid(slow).length);
+    expect(tender.art.pulseMode).toBe('attack');
+  });
+
+  it('цвет всегда из снимка: смена настроения и трека не трогает палитру', () => {
+    const a = generateRelive(base({ mood: 'calm' }));
+    const b = generateRelive(base({ mood: 'drive', song: electro }));
+    expect(b.art.palette).toEqual(a.art.palette);
+    expect(b.art.glowColor).toBe(a.art.glowColor);
+    // А ритм сцен меняется вместе с треком.
+    expect(b.beatMs).not.toBe(a.beatMs);
+    expect(b.scenes.map((s) => s.durationMs)).not.toEqual(a.scenes.map((s) => s.durationMs));
+  });
+
+  it('без выбора настроения причины прежние, вес настроения не учитывается', () => {
+    const g = generateRelive(base());
+    expect(g.reasons!.some((r) => r.kind === 'mood')).toBe(false);
+    expect(g.paramDetails.intimacy.parts.some((p) => p.source === 'mood')).toBe(false);
+    expect(g.mood ?? null).toBeNull();
+  });
+});

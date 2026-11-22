@@ -122,3 +122,16 @@ input[type='time'] {
 :root[data-motion='reduce'] ::view-transition-new(*) {
   animation: none !important;
 }
+
+/* Смена обложки в редакторе: мягкое проявление; при Reduced Motion — мгновенно */
+@keyframes cover-in {
+  from { opacity: 0; transform: scale(1.03); }
+  to { opacity: 1; transform: none; }
+}
+.cover-in { animation: cover-in 420ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .cover-in { animation: none; }
+}
+
+/* Поле в фокусе не прячется под нижней кнопкой редактора */
+.editor input, .editor textarea, .editor button { scroll-margin-bottom: 120px; scroll-margin-top: 96px; }

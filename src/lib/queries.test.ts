@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildSongProfile } from '../engine/audioAnalysis';
 import { analyzeText } from '../engine/textAnalysis';
 import { fitWords, suggestTitle } from '../engine/title';
-import { mapDraftStep } from '../store/draft';
+import { draftFromRecord } from '../store/draft';
 import { homeEvent, onThisDay, remaining, searchMemories, songLibrary } from './queries';
 import type { CountdownEvent, Memory } from './types';
 import { countWords, titleWordStatus, typo } from './util';
@@ -94,9 +94,35 @@ describe('названия 2/3/7/8 слов', () => {
     expect(analyzeText(t).seasonHits.map((h) => h.season)).toContain('winter');
   });
 
-  it('черновики семишагового мастера открываются на соответствующем шаге', () => {
-    expect([0, 1, 2, 3, 4, 5, 6].map((s) => mapDraftStep(s))).toEqual([0, 0, 0, 1, 2, 2, 3]);
-    expect(mapDraftStep(2, 2)).toBe(2);
+  it('черновики семи- и четырёхшаговой версий открываются на одном экране со всеми полями', () => {
+    const photos = [
+      { id: 'p2', blobId: 'b2', thumbBlobId: 't2', name: '2.jpg', alt: '', width: 1, height: 1, features: {} },
+      { id: 'p1', blobId: 'b1', thumbBlobId: 't1', name: '1.jpg', alt: 'озеро', width: 1, height: 1, features: {} },
+    ];
+    const input = {
+      date: '2025-10-03',
+      title: 'Тихий вечер у озера',
+      text: 'Сидели у воды до темноты.',
+      photos,
+      coverId: 'p1',
+      song: { source: 'description', title: 'Капли', artist: '', genre: 'фортепиано', mood: 'тихое' },
+      voice: { blobId: 'v1', durationSec: 12, mime: 'audio/webm' },
+    } as unknown as Memory;
+    for (const rec of [
+      { step: 5, input, memoryId: 'm-old', generation: null }, // семь шагов, без flow
+      { step: 2, flow: 2, input, memoryId: 'm-mid', generation: null }, // четыре шага
+    ]) {
+      const d = draftFromRecord(rec);
+      expect(d.input.date).toBe('2025-10-03');
+      expect(d.input.title).toBe('Тихий вечер у озера');
+      expect(d.input.text).toBe('Сидели у воды до темноты.');
+      expect(d.input.coverId).toBe('p1');
+      expect(d.input.photos.map((p) => p.id)).toEqual(['p2', 'p1']);
+      expect(d.input.song).toEqual(input.song);
+      expect(d.input.voice).toEqual(input.voice);
+      expect(d.input.mood).toBeNull();
+      expect(d.memoryId).toBe(rec.memoryId);
+    }
   });
 
   it('имя рядом распознаётся', () => {

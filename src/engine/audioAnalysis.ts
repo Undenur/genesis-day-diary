@@ -2,7 +2,7 @@
  * Анализ аудиосигнала (моно Float32Array): RMS, пики энергии, периодичность атак → BPM с уверенностью.
  * Плюс построение SongProfile из измерений, описания и ручных значений (ручной BPM в приоритете).
  */
-import type { AudioFeatures, Scale, SongInput, SongProfile, SynthTexture, ValueSource } from '../lib/types';
+import type { AudioFeatures, Scale, SongInput, SongProfile, SoundTexture, ValueSource } from '../lib/types';
 import { clamp, normalizeRu } from '../lib/util';
 
 export function analyzeSignal(signal: Float32Array, sampleRate: number): AudioFeatures {
@@ -116,7 +116,7 @@ const SOFT = /(тих|спокойн|мягк|нежн|камерн|фортеп
 const SAD = /(грустн|минор|печальн|меланхол|дожд|ностальг|тоск)/;
 const UPBEAT = /(радост|весел|бодр|поп|летн|солнечн|праздн|джаз|фанк|диско)/;
 
-export function textureFrom(genre: string, mood: string, energy: number): SynthTexture {
+export function textureFrom(genre: string, mood: string, energy: number): SoundTexture {
   const g = normalizeRu(`${genre} ${mood}`);
   if (/(фортепиан|пиано|piano|камерн|классик)/.test(g)) return 'piano';
   if (/(эмбиент|ambient|атмосфер|космич|дрон)/.test(g)) return 'ambient';

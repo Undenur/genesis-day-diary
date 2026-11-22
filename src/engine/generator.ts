@@ -18,12 +18,13 @@ import type {
   PhotoFeatures, Reason, Scene, Season, Shot, SongProfile, Weather,
 } from '../lib/types';
 import { clamp, colorName, countWords, hashString, hexToRgb, lerp, liftColor, plural, rng, round, toHex } from '../lib/util';
+import { moodOf, type MoodId } from '../lib/catalog';
 import { TARGET_NORMAL, relLuminance, shadeFor, zoneCost, zoneOf } from './legibility';
 import { freeSide, hueDist } from './photoAnalysis';
 import { analyzeText, extractPhrases, type TextAnalysis } from './textAnalysis';
 import { suggestTitle } from './title';
 
-export const ALGORITHM_VERSION = 'momenta-dna-1.1';
+export const ALGORITHM_VERSION = 'momenta-dna-1.2';
 
 export interface GeneratorInput {
   text: string;
@@ -36,15 +37,25 @@ export interface GeneratorInput {
   coverIndex: number;
   song: SongProfile | null;
   songLabel: string;
+  /** Как ощущался день — выбор автора. Умеренно влияет на подачу, не на цвет и не на ритм. */
+  mood?: MoodId | null;
 }
 
-/** Веса источников для каждого параметра (сумма = 1). */
-export const WEIGHTS: Record<ParamKey, { text: number; photo: number; music: number }> = {
-  warmth: { photo: 0.6, text: 0.25, music: 0.15 },
+type Source = 'text' | 'photo' | 'music' | 'mood';
+const SOURCES: Source[] = ['text', 'photo', 'music', 'mood'];
+
+/**
+ * Веса источников для каждого параметра (сумма = 1).
+ * Настроение автора (mood) влияет только на подачу — Warmth, Nostalgia, Intimacy.
+ * Энергию и плотность монтажа задают трек, текст и кадр: так «Нежность» с быстрым треком
+ * остаётся камерной по композиции, а монтаж становится плотным.
+ */
+export const WEIGHTS: Record<ParamKey, Partial<Record<Source, number>>> = {
+  warmth: { photo: 0.55, text: 0.22, music: 0.13, mood: 0.1 },
   energy: { music: 0.45, text: 0.35, photo: 0.2 },
   density: { photo: 0.4, text: 0.3, music: 0.3 },
-  nostalgia: { text: 0.35, photo: 0.3, music: 0.35 },
-  intimacy: { text: 0.45, photo: 0.3, music: 0.25 },
+  nostalgia: { text: 0.3, photo: 0.25, music: 0.25, mood: 0.2 },
+  intimacy: { text: 0.35, photo: 0.25, music: 0.2, mood: 0.2 },
 };
 
 const f2 = (v: number) => v.toLocaleString('ru-RU', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -82,12 +93,15 @@ export function generateRelive(input: GeneratorInput): Generation {
   const photoAgg = aggregatePhotos(input.photos, input.coverIndex);
   const dateYear = Number(input.date.slice(0, 4)) || 2025;
   const musicEst = song ? song.energySource !== 'measured' : true;
+  const mood = moodOf(input.mood);
+  const moodNote = mood ? `выбрано «${mood.emoji} ${mood.label}»` : '';
 
   const sources = {
     warmth: {
       photo: { v: (photoAgg.warmth + 1) / 2, note: `тёплые/холодные тона кадров ${f2(photoAgg.warmth)}` },
       text: { v: (a.warmth + 1) / 2, note: a.details.length || a.seasonHits.length ? `ассоциации текста: ${quote([...a.details.map((d) => d.word), ...a.seasonHits.map((s) => s.word)])}` : 'нейтральный текст' },
       music: song ? { v: musicWarmth(song), note: `${song.scale === 'major' ? 'мажор' : 'минор'}${song.scaleSource === 'manual' ? '' : ' (предположение)'}, мягкость ${f2(song.softness)}` } : null,
+      mood: mood ? { v: mood.feel.warmth, note: moodNote } : null,
     },
     energy: {
       music: song ? { v: song.energy, note: `энергия трека ${f2(song.energy)}${song.energySource === 'measured' ? ' (измерено)' : ' (оценка по описанию)'}` } : null,
@@ -103,11 +117,13 @@ export function generateRelive(input: GeneratorInput): Generation {
       text: { v: a.nostalgia, note: a.nostalgiaWords.length ? `слова о прошлом: ${quote(a.nostalgiaWords)}` : 'мало слов о прошлом' },
       photo: { v: photoAgg.nostalgia, note: `насыщенность ${f2(cover.saturation)}, контраст ${f2(cover.contrast)}` },
       music: song ? { v: musicNostalgia(song, dateYear), note: `${song.scale === 'minor' ? 'минор' : 'мажор'}, ${song.bpm} BPM${song.year ? `, ${song.year} год` : ''}` } : null,
+      mood: mood ? { v: mood.feel.nostalgia, note: moodNote } : null,
     },
     intimacy: {
       text: { v: a.intimacy, note: a.people.length ? `рядом: ${quote(a.people.map((p) => p.word))}` : 'никто не назван — камерный рассказ' },
       photo: { v: photoAgg.intimacy, note: `детали в центре кадра ${f2(cover.detailGrid[4])}` },
       music: song ? { v: clamp(song.softness * 0.6 + (1 - song.energy) * 0.4), note: `мягкость звучания ${f2(song.softness)}` } : null,
+      mood: mood ? { v: mood.feel.intimacy, note: moodNote } : null,
     },
   } as const;
 
@@ -115,14 +131,15 @@ export function generateRelive(input: GeneratorInput): Generation {
   const params = {} as Record<ParamKey, number>;
   for (const key of Object.keys(WEIGHTS) as ParamKey[]) {
     const parts: ParamPart[] = [];
-    const srcs = sources[key] as Record<'text' | 'photo' | 'music', { v: number; note: string } | null>;
+    const srcs = sources[key] as Partial<Record<Source, { v: number; note: string } | null>>;
     let wSum = 0;
-    for (const src of ['text', 'photo', 'music'] as const) if (srcs[src]) wSum += WEIGHTS[key][src];
+    for (const src of SOURCES) if (srcs[src] && WEIGHTS[key][src]) wSum += WEIGHTS[key][src]!;
     let acc = 0;
-    for (const src of ['text', 'photo', 'music'] as const) {
+    for (const src of SOURCES) {
       const s = srcs[src];
-      if (!s) continue;
-      const w = WEIGHTS[key][src] / wSum; // перераспределение веса при отсутствии источника
+      const base = WEIGHTS[key][src];
+      if (!s || !base) continue;
+      const w = base / wSum; // перераспределение веса при отсутствии источника
       acc += w * clamp(s.v);
       parts.push({ source: src, weight: round(w, 2), value: round(clamp(s.v), 2), estimated: src === 'music' && musicEst, note: s.note });
     }
@@ -211,7 +228,7 @@ export function generateRelive(input: GeneratorInput): Generation {
   explanations.push({
     topic: 'rhythm',
     source: song ? 'music' : 'estimate',
-    text: `${tempoSourceText(song, bpm, a.dynamics)}: доля ${sec(beatMs)}, такт ${sec(barMs)} — шаг монтажа кратен такту. Переход ${sec(transitionMs)}: Energy ${params.energy}${song ? `, мягкость трека ${f2(song.softness)}` : ''}${slowWords.length ? `, слово ${quote(slowWords, 1)} удлинило растворение` : ''}. ${pulseMode === 'attack' ? `Пульс идёт по атакам файла${beatOffsetMs ? ` со смещением сетки ${sec(beatOffsetMs)}` : ''}.` : 'Пульс — спокойное дыхание: у трека нет уверенно различимых атак или темп оценён.'}`,
+    text: `${tempoSourceText(song, bpm, a.dynamics, input.songLabel)}: доля ${sec(beatMs)}, такт ${sec(barMs)} — шаг монтажа кратен такту. Переход ${sec(transitionMs)}: Energy ${params.energy}${song ? `, мягкость трека ${f2(song.softness)}` : ''}${slowWords.length ? `, слово ${quote(slowWords, 1)} удлинило растворение` : ''}. ${pulseMode === 'attack' ? `Пульс идёт по атакам файла${beatOffsetMs ? ` со смещением сетки ${sec(beatOffsetMs)}` : ''}.` : 'Пульс — спокойное дыхание: у трека нет уверенно различимых атак или темп оценён.'}`,
   });
 
   const filterFor = (s: ArtStyle) => {
@@ -276,10 +293,13 @@ export function generateRelive(input: GeneratorInput): Generation {
   explanations.push({
     topic: 'sound',
     source: song ? 'music' : 'estimate',
-    text: song ? song.notes.join('. ') + `. Пульс свечения — каждые ${sec(beatMs)}, амплитуда ${Math.round(art.glowAmp * 100)}%.` : `Песня не указана: синтез MOMENTA играет в темпе ${bpm} BPM, выведенном из динамики текста (${f2(a.dynamics)}).`,
+    text: song ? `Звучит ${input.songLabel}. ` + song.notes.join('. ') + `. Пульс свечения — каждые ${sec(beatMs)}, амплитуда ${Math.round(art.glowAmp * 100)}%.` : `Музыки нет: темп ${bpm} BPM выведен из динамики текста (${f2(a.dynamics)}).`,
   });
 
-  const reasons = buildReasons({ a, slowWords, transitionMs, transitionBase, glow, light, song, bpm, barMs, scenes, captions });
+  const reasons = buildReasons({ a, slowWords, transitionMs, transitionBase, glow, light, song, bpm, barMs, scenes, captions, mood, params, titleSize: art.titleSize, songLabel: input.songLabel });
+  if (mood && song && mood.feel.energy <= 0.35 && song.energy >= 0.6) {
+    explanations.push({ topic: 'rhythm', source: 'music', text: `Настроение «${mood.label}» и быстрый трек сосуществуют: подача камерная (Intimacy ${params.intimacy}, подпись ${art.titleSize} px), а монтаж плотный — его задаёт энергия трека ${f2(song.energy)} и такт ${sec(barMs)}.` });
+  }
 
   return {
     algorithmVersion: ALGORITHM_VERSION,
@@ -298,6 +318,7 @@ export function generateRelive(input: GeneratorInput): Generation {
     explanations,
     song,
     reasons,
+    mood: input.mood ?? null,
     textSummary: {
       places: a.places.map((p) => p.word),
       events: a.events.map((e) => e.word),
@@ -328,11 +349,11 @@ function areaName(x: number, y: number) {
   return h === 'центральной' && v === 'средней' ? 'центра' : `${v} ${h} части`;
 }
 
-function tempoSourceText(song: SongProfile | null, bpm: number, dynamics: number) {
-  if (!song) return `Без песни темп ${bpm} BPM выведен из динамики текста ${f2(dynamics)}`;
+function tempoSourceText(song: SongProfile | null, bpm: number, dynamics: number, label = '') {
+  if (!song) return `Без музыки темп ${bpm} BPM выведен из динамики текста ${f2(dynamics)}`;
   switch (song.bpmSource) {
     case 'measured':
-      return `${bpm} BPM измерены по файлу (уверенность ${Math.round(song.bpmConfidence * 100)}%)`;
+      return `${label ? label + ': ' : ''}${bpm} BPM измерены по файлу (уверенность ${Math.round(song.bpmConfidence * 100)}%)`;
     case 'manual':
       return `${bpm} BPM указаны вручную`;
     case 'description':
@@ -355,8 +376,19 @@ function buildReasons(c: {
   barMs: number;
   scenes: Scene[];
   captions: string[];
+  mood: ReturnType<typeof moodOf>;
+  params: Record<ParamKey, number>;
+  titleSize: number;
+  songLabel: string;
 }): Reason[] {
   const out: Reason[] = [];
+  if (c.mood) {
+    const fast = c.song && c.mood.feel.energy <= 0.35 && c.song.energy >= 0.6;
+    out.push({
+      kind: 'mood',
+      text: `Вы выбрали «${c.mood.emoji} ${c.mood.label}» → Intimacy ${c.params.intimacy}, Nostalgia ${c.params.nostalgia}: кадр ${c.params.intimacy >= 60 ? 'ближе' : 'шире'}, подпись ${c.titleSize} px.${fast ? ' Трек быстрый — монтаж плотный, но подача остаётся камерной.' : ''}`,
+    });
+  }
   const fin = c.scenes[c.scenes.length - 1];
   if (c.slowWords.length && c.transitionMs !== c.transitionBase) {
     out.push({ kind: 'phrase', text: `Ваше «${c.slowWords[0].toLowerCase()}» удлинило переходы: ${sec(c.transitionBase)} → ${sec(c.transitionMs)}.` });
@@ -368,8 +400,8 @@ function buildReasons(c: {
   out.push({ kind: 'color', color: c.glow.hex, text: `${cap1(colorName(c.glow.h, c.glow.s, c.glow.l))} ${c.glow.hex} из ${areaName(c.light.x, c.light.y)} обложки стал цветом свечения.` });
   const middleBars = c.scenes.slice(1, -1).map((s) => s.bars);
   const scale = c.song && c.song.scaleSource !== 'manual' ? ` Лад «${c.song.scale === 'minor' ? 'минор' : 'мажор'}» — предположение по описанию.` : '';
-  out.push({ kind: 'tempo', text: `${tempoSourceText(c.song, c.bpm, c.a.dynamics)} → такт ${sec(c.barMs)}, середина по ${bars(Math.max(...middleBars, 1))}.${c.song?.bpmSource === 'measured' ? '' : scale}` });
-  return out.slice(0, 3);
+  out.push({ kind: 'tempo', text: `${tempoSourceText(c.song, c.bpm, c.a.dynamics, c.songLabel)} → такт ${sec(c.barMs)}, середина по ${bars(Math.max(...middleBars, 1))}.${c.song?.bpmSource === 'measured' ? '' : scale}` });
+  return out.slice(0, 4);
 }
 
 const cap1 = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);

@@ -33,6 +33,16 @@ export default defineConfig({
         navigateFallback: 'index.html',
         runtimeCaching: [
           {
+            // Композиции каталога: полный файл в кэше, перемотка — диапазонами из него (src/services/offlineAudio.ts).
+            urlPattern: ({ url }) => url.pathname.startsWith('/audio/'),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'momenta-audio',
+              rangeRequests: true,
+              cacheableResponse: { statuses: [200] },
+            },
+          },
+          {
             urlPattern: /^https:\/\/[abc]?\.?tile\.openstreetmap\.org\/.*/,
             handler: 'CacheFirst',
             options: {

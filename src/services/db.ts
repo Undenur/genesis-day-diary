@@ -255,6 +255,31 @@ export async function insertMemoryIfAbsent(memory: Memory, blobs: { id: string; 
   }
 }
 
+/**
+ * Замена записи дня, только если её никто не изменил с момента чтения (updatedAt совпадает).
+ * Старые файлы удаляются в той же транзакции. Нужна для фоновых обновлений, которые не должны
+ * перетирать правку автора, сделанную в это же время в другой вкладке.
+ */
+export async function replaceMemoryIfUnchanged(memory: Memory, expectedUpdatedAt: string, removeBlobIds: string[] = []): Promise<boolean> {
+  const d = await db();
+  const tx = d.transaction(['memories', 'blobs'], 'readwrite');
+  try {
+    const cur = (await tx.objectStore('memories').get(memory.id)) as Memory | undefined;
+    if (!cur || cur.updatedAt !== expectedUpdatedAt) {
+      await tx.done;
+      return false;
+    }
+    await tx.objectStore('memories').put(memory);
+    for (const id of removeBlobIds) await tx.objectStore('blobs').delete(id);
+    await tx.done;
+    return true;
+  } catch (e) {
+    try { tx.abort(); } catch { /* уже завершена */ }
+    if (isQuota(e)) throw new StorageFullError();
+    throw e;
+  }
+}
+
 export async function insertCountdownIfAbsent(ev: CountdownEvent, cover: { id: string; blob: Blob } | null): Promise<boolean> {
   const d = await db();
   const tx = d.transaction(['countdowns', 'blobs'], 'readwrite');

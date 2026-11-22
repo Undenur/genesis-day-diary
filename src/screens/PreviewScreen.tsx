@@ -13,7 +13,7 @@ import { useDraft } from '../store/draft';
 
 export default function PreviewScreen() {
   const nav = useNavigate();
-  const { loaded, load, input, generation, setGeneration, memoryId, setStep } = useDraft();
+  const { loaded, load, input, generation, setGeneration, memoryId } = useDraft();
   const { saveMemory, saveCountdown, countdowns } = useData();
   const [saving, setSaving] = useState(false);
   const [editTitle, setEditTitle] = useState(false);
@@ -53,13 +53,11 @@ export default function PreviewScreen() {
       <Player
         input={input}
         generation={generation}
-        onClose={() => {
-          setStep(3);
-          nav('/create/relive');
-        }}
+        // Возврат к редактору: весь ввод лежит в черновике и открывается как был.
+        onClose={() => nav('/create/relive')}
         actions={
           <>
-            <Button variant="outline" icon={Undo2} onClick={() => { setStep(0); nav('/create/relive'); }} aria-label="Вернуться к исходным данным" className="flex-none px-3">
+            <Button variant="outline" icon={Undo2} onClick={() => nav('/create/relive')} aria-label="Вернуться к исходным данным" className="flex-none px-3">
               <span className="hidden sm:inline">К данным</span>
             </Button>
             <Button variant="secondary" icon={Pencil} onClick={() => { setTitle(generation.title); setEditTitle(true); }} className="flex-none px-3" aria-label="Изменить название">

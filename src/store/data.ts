@@ -50,6 +50,15 @@ export const useData = create<DataState>()((set, get) => ({
           await get().reload();
         }
         set({ status: 'ready' });
+        // Установки до 1.2 звучали синтезом: демо-дни переходят на композиции каталога в фоне,
+        // архив при этом уже открыт и работает.
+        if ((await store.getMeta<number>('demoAudio')) !== 2) {
+          const { upgradeDemoAudio } = await import('../services/demo');
+          if (await upgradeDemoAudio()) {
+            await get().reload();
+            notifyTabs();
+          }
+        }
       } catch (e) {
         console.error(e);
         set({ status: 'error', error: (e as Error).message });

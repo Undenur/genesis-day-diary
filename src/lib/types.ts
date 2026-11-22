@@ -1,4 +1,5 @@
 /** Центральные типы MOMENTA. Все представления (архив, хронология, музыка, карта, Countdown) ссылаются на Memory.id. */
+import type { MoodId } from './catalog';
 
 export type Category = 'travel' | 'meeting' | 'holiday' | 'study' | 'personal';
 export type Season = 'winter' | 'spring' | 'summer' | 'autumn';
@@ -12,13 +13,18 @@ export interface Place {
   lng?: number;
 }
 
-/** Ввод песни пользователем: файл, ссылка или описание. */
+/**
+ * Реально звучащий источник: трек каталога (trackId), свой файл (fileBlobId) или ссылка.
+ * 'description' — старые записи до версии 1.2 (раньше по описанию играл синтез; теперь — подборка каталога).
+ */
 export interface SongInput {
-  source: 'file' | 'link' | 'description';
+  source: 'catalog' | 'file' | 'link' | 'description';
+  /** Стабильный id трека каталога (src/lib/catalog.ts) */
+  trackId?: string;
   title: string;
   artist: string;
   genre: string;
-  /** Характер звучания: «тихое», «энергичное», «мечтательное»… */
+  /** Характер звучания из описания (старые записи) — не путать с настроением автора MemoryInput.mood */
   mood: string;
   year?: number;
   bpm?: number;
@@ -61,7 +67,7 @@ export interface SongProfile {
   attackDensity: number;
   scale: Scale;
   scaleSource: ValueSource;
-  texture: SynthTexture;
+  texture: SoundTexture;
   softness: number;
   /** Есть ли реальный сигнал (файл измерен) */
   measured?: boolean;
@@ -70,7 +76,7 @@ export interface SongProfile {
   notes: string[];
 }
 
-export type SynthTexture = 'piano' | 'ambient' | 'electronic' | 'acoustic';
+export type SoundTexture = 'piano' | 'ambient' | 'electronic' | 'acoustic';
 
 export interface PaletteColor {
   hex: string;
@@ -145,12 +151,16 @@ export interface MemoryInput {
   song: SongInput | null;
   voice: VoiceNoteRef | null;
   countdownId?: string;
+  /** Как ощущался день — выбор автора (эмодзи). Не цвет и не трек: влияет на характер подачи. */
+  mood?: MoodId | null;
 }
+
+export type { MoodId };
 
 export type ParamKey = 'warmth' | 'energy' | 'density' | 'nostalgia' | 'intimacy';
 
 export interface ParamPart {
-  source: 'text' | 'photo' | 'music';
+  source: 'text' | 'photo' | 'music' | 'mood';
   weight: number;
   value: number;
   estimated: boolean;
@@ -234,7 +244,7 @@ export interface Scene {
 
 /** Короткая причина для «Почему такая атмосфера?» */
 export interface Reason {
-  kind: 'phrase' | 'color' | 'tempo';
+  kind: 'mood' | 'phrase' | 'color' | 'tempo';
   text: string;
   color?: string;
 }
@@ -264,6 +274,10 @@ export interface Generation {
   textSummary: TextSummary;
   /** До трёх главных причин из данных этой записи (версия 1.1+) */
   reasons?: Reason[];
+  /** Настроение автора, учтённое при сборке (версия 1.2+) */
+  mood?: MoodId | null;
+  /** Что реально звучало при сборке: трек каталога, свой файл или ссылка (версия 1.2+) */
+  sound?: { kind: 'catalog' | 'file' | 'link'; trackId?: string; label: string };
 }
 
 export interface TextSummary {

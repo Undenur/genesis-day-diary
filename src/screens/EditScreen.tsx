@@ -1,17 +1,19 @@
-/** Редактирование дня: описание сохраняется сразу, изменения медиа и песни требуют пересборки; новый заголовок согласуется. */
+/**
+ * Редактирование дня — тот же единый редактор, что и при создании (DayForm).
+ * Описание сохраняется сразу; изменения фото, настроения, музыки и голоса требуют пересборки,
+ * новая версия показывается рядом со старой (сравнение), новый заголовок согласуется.
+ * Простой просмотр формы ничего не меняет в записи: старые песни (файл, ссылка, описание) остаются как есть.
+ */
 import { Eye, RefreshCw, Save } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Page } from '../components/Layout';
-import { ContextField } from '../components/form/ContextField';
-import { PhotosField } from '../components/form/PhotosField';
-import { SongField } from '../components/form/SongField';
-import { VoiceField } from '../components/form/VoiceField';
+import { DayForm, validateDay } from '../components/form/DayForm';
 import { Player } from '../components/relive/Player';
-import { Button, Card, Field, PageHeader, Spinner, inputCls, toast } from '../components/ui';
+import { Button, Card, PageHeader, Spinner, toast } from '../components/ui';
 import { diffGenerations } from '../lib/diff';
 import type { Generation, MemoryInput } from '../lib/types';
-import { titleWordStatus, todayISO } from '../lib/util';
+import { titleWordStatus } from '../lib/util';
 import { StorageFullError } from '../services/db';
 import { buildRelive, STEP_LABEL, toMemory, type ProgressStep } from '../services/pipeline';
 import { useData } from '../store/data';
@@ -34,7 +36,7 @@ export default function EditScreen() {
 
   const mediaChanged = useMemo(() => {
     if (!m || !form) return false;
-    const ids = (x: MemoryInput) => JSON.stringify([x.photos.map((p) => p.id), x.coverId, x.song, x.voice?.blobId]);
+    const ids = (x: MemoryInput) => JSON.stringify([x.photos.map((p) => p.id), x.coverId, x.song, x.voice?.blobId, x.mood ?? null]);
     return ids(m) !== ids(form);
   }, [m, form]);
 
@@ -44,9 +46,11 @@ export default function EditScreen() {
     setForm({ ...form, ...patch });
     setPending(null);
   };
-  const titleStatus = titleWordStatus(form.title);
+  const errors = validateDay(form);
   const textChanged = form.text !== m.text;
-  const valid = titleStatus.ok && form.text.trim().length >= 3 && form.photos.length > 0;
+  const valid = Object.keys(errors).length === 0;
+  // Сохранить описание без пересборки можно только с названием: пустое название придумывает генератор при сборке.
+  const titleOk = titleWordStatus(form.title).ok;
 
   const rebuild = async () => {
     if (!valid) return;
@@ -94,34 +98,10 @@ export default function EditScreen() {
   }
 
   return (
-    <Page>
+    <Page wide>
       <PageHeader title="Изменить день" />
       <div className="flex flex-col gap-6 pb-36">
-        <Field label="Название (3–7 слов)" htmlFor="etitle" error={!titleStatus.ok ? titleStatus.message : null} hint={`✓ ${titleStatus.message}`}>
-          <input id="etitle" className={`${inputCls} font-title`} value={form.title} aria-invalid={!titleStatus.ok} onChange={(e) => update({ title: e.target.value })} />
-        </Field>
-        <Field label="Дата" htmlFor="edate">
-          <input id="edate" type="date" max={todayISO()} className={inputCls} value={form.date} onChange={(e) => update({ date: e.target.value })} />
-        </Field>
-        <Field label="Описание" htmlFor="etext" error={form.text.trim().length < 3 ? 'Нужен хотя бы короткий текст' : null}>
-          <textarea id="etext" rows={8} className={`${inputCls} leading-relaxed`} value={form.text} onChange={(e) => update({ text: e.target.value })} />
-        </Field>
-        <section>
-          <h2 className="mb-3 text-[17px] font-semibold">Фото</h2>
-          <PhotosField photos={form.photos} coverId={form.coverId} owner={m.id} onChange={(photos, coverId) => update({ photos, coverId })} invalid={!form.photos.length} />
-        </section>
-        <section>
-          <h2 className="mb-3 text-[17px] font-semibold">Песня</h2>
-          <SongField song={form.song} owner={m.id} onChange={(song) => update({ song })} />
-        </section>
-        <section>
-          <h2 className="mb-3 text-[17px] font-semibold">Голос</h2>
-          <VoiceField voice={form.voice} owner={m.id} onChange={(voice) => update({ voice })} />
-        </section>
-        <section>
-          <h2 className="mb-3 text-[17px] font-semibold">Контекст</h2>
-          <ContextField input={form} onChange={update} />
-        </section>
+        <DayForm input={form} update={update} owner={m.id} errors={errors} />
 
         {pending && (
           <Card className="p-4" as="section">
@@ -183,7 +163,7 @@ export default function EditScreen() {
             ) : (
               <>
                 {!mediaChanged && (
-                  <Button variant="outline" icon={Save} onClick={saveDescriptionOnly} disabled={!valid || saving} className="flex-1">
+                  <Button variant="outline" icon={Save} onClick={saveDescriptionOnly} disabled={!valid || !titleOk || saving} className="flex-1">
                     Сохранить описание
                   </Button>
                 )}

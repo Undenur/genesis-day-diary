@@ -1,5 +1,5 @@
 /** «Почему такая атмосфера?» — объяснение решений генератора с фактическими измерениями этой записи. */
-import { AudioLines, Camera, Gauge, Palette, PenLine, Quote, Sparkles } from 'lucide-react';
+import { AudioLines, Camera, Gauge, Heart, Palette, PenLine, Quote, Sparkles } from 'lucide-react';
 import { WEIGHTS } from '../../engine/generator';
 import type { Explanation, Generation, ParamKey, Reason } from '../../lib/types';
 import { colorName, hexToRgb, plural, rgbToHsl } from '../../lib/util';
@@ -13,7 +13,7 @@ export const PARAM_LABEL: Record<ParamKey, { name: string; hint: string }> = {
   intimacy: { name: 'Intimacy', hint: 'близость кадра и подписи' },
 };
 
-const SRC_LABEL = { text: 'текст', photo: 'фото', music: 'музыка' } as const;
+const SRC_LABEL = { text: 'текст', photo: 'фото', music: 'музыка', mood: 'настроение' } as const;
 const STYLE_LABEL = { impressionism: 'Импрессионизм: рассеянный свет', kandinsky: 'Кандинский: геометрия ритма', minimal: 'Минимализм с воздухом' } as const;
 
 const SOURCE_ICON: Record<Explanation['source'], typeof Camera> = {
@@ -51,7 +51,7 @@ export function ParamBars({ g, compact }: { g: Generation; compact?: boolean }) 
   );
 }
 
-const REASON_ICON: Record<Reason['kind'], typeof Camera> = { phrase: Quote, color: Palette, tempo: AudioLines };
+const REASON_ICON: Record<Reason['kind'], typeof Camera> = { mood: Heart, phrase: Quote, color: Palette, tempo: AudioLines };
 
 /** Для дней версии до 1.1 причины собираются из сохранённых объяснений — тех же, что были применены. */
 function reasonsOf(g: Generation): Reason[] {

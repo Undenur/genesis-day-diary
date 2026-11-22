@@ -1,6 +1,7 @@
 /**
  * Три контрастных демо-дня, созданные обычным генератором из собственных материалов:
- * иллюстрации из scripts/gen-assets.mjs, треки — синтез MOMENTA, отрендеренный в WAV и измеренный как обычный файл.
+ * иллюстрации из scripts/gen-assets.mjs, музыка — композиции каталога настроений (public/audio, CC BY 4.0).
+ * Каждый демо-день звучит своей композицией и измеряется по настоящему сигналу, как любой день автора.
  *
  * Первый запуск повторяем после перезагрузки, прерывания и параллельного запуска во второй вкладке:
  * — у каждого демо-дня и события устойчивый id (не зависит от названия, которое пользователь может изменить);
@@ -8,12 +9,13 @@
  * — подготовку занимает межвкладочная блокировка Web Locks; вторая вкладка дождётся первой.
  * Никакие существующие записи не удаляются и не перезаписываются.
  */
-import type { Category, CountdownEvent, Memory, MemoryInput, Place, Scale, SynthTexture, Weather } from '../lib/types';
-import { hashString, seasonFromDate, todayISO } from '../lib/util';
-import { getMeta, insertCountdownIfAbsent, insertMemoryIfAbsent, listCountdowns, listMemories, setMeta } from './db';
-import { analyzeAudioBlob, preparePhoto } from './media';
+import { trackForMood, type MoodId } from '../lib/catalog';
+import type { Category, CountdownEvent, Memory, MemoryInput, Place, Weather } from '../lib/types';
+import { seasonFromDate, todayISO } from '../lib/util';
+import { getMeta, insertCountdownIfAbsent, insertMemoryIfAbsent, listCountdowns, listMemories, replaceMemoryIfUnchanged, setMeta } from './db';
+import { preparePhoto } from './media';
+import { catalogSong } from './musicSource';
 import { buildRelive, toMemory } from './pipeline';
-import { renderSynthWav } from './synth';
 
 export type DemoKey = 'mountains' | 'night' | 'rain';
 
@@ -26,7 +28,8 @@ export interface DemoDef {
   place: Omit<Place, 'id'>;
   photos: string[];
   text: string;
-  track: { title: string; artist: string; genre: string; mood: string; bpm: number; scale: Scale; texture: SynthTexture; energy: number; year: number };
+  /** Настроение дня: по нему звучит своя композиция каталога (у трёх демо — три разные) */
+  mood: MoodId;
 }
 
 export interface DemoEventDef {
@@ -62,7 +65,7 @@ export function demoDefs(today = todayISO()): DemoDef[] {
       photos: ['mountains-dawn', 'lake-turquoise', 'tea-thermos'],
       text:
         'Поднялись на перевал ещё до рассвета, пока туман лежал в долине, как молоко. Шли медленно и слушали, как дышат горы и шуршат камни под ногами. Вдвоём с Аней пили чай из термоса и молчали — так спокойно не было давно. Озеро внизу стало бирюзовым, когда солнце вышло из-за вершин. На обратном пути запомнился запах полыни и тёплый камень под ладонью.',
-      track: { title: 'Высота 2800', artist: 'MOMENTA Demo', genre: 'эмбиент', mood: 'воздушный, спокойный', bpm: 76, scale: 'major', texture: 'ambient', energy: 0.35, year: year - 1 },
+      mood: 'calm',
     },
     {
       key: 'night',
@@ -74,7 +77,7 @@ export function demoDefs(today = todayISO()): DemoDef[] {
       photos: ['stage-lights', 'crowd-hands'],
       text:
         'Концерт начался ближе к полуночи, и склад на набережной гудел, как улей. Прожекторы резали дым на полосы, бас бил прямо в грудь. Мы с друзьями прыгали у самой сцены и кричали припев так громко, что не слышали друг друга! Танцевали до утра, пока ноги не перестали слушаться. На выходе город был синим и тихим, а в ушах ещё звенело.',
-      track: { title: 'Стробоскоп', artist: 'MOMENTA Demo', genre: 'электроника', mood: 'энергичный драйв', bpm: 136, scale: 'minor', texture: 'electronic', energy: 0.9, year: 2024 },
+      mood: 'drive',
     },
     {
       key: 'rain',
@@ -86,7 +89,7 @@ export function demoDefs(today = todayISO()): DemoDef[] {
       photos: ['rain-window', 'cup-lamp'],
       text:
         'Весь вечер шёл дождь, и мы с мамой сидели у окна в маленькой кофейне у вокзала. Капли стекали по стеклу, огни улицы расплывались в золотые пятна. Лампа над столом грела ладони, чай остывал неспешно. Было совсем не грустно — тихо и тепло, как в детстве. Последним запомнился запах корицы на выходе.',
-      track: { title: 'Капли на стекле', artist: 'MOMENTA Demo', genre: 'камерное фортепиано', mood: 'тихое, нежное', bpm: 62, scale: 'minor', texture: 'piano', energy: 0.2, year: 2019 },
+      mood: 'tender',
     },
   ];
 }
@@ -95,17 +98,6 @@ export const DEMO_EVENTS: DemoEventDef[] = [
   { key: 'baikal', title: 'Поездка на Байкал', dayOffset: 18, time: '07:30', img: 'baikal-ice', category: 'travel', description: 'Прозрачный лёд, коньки и термос с облепиховым чаем.' },
   { key: 'birthday', title: 'День рождения Ани', dayOffset: -1, time: '19:00', img: 'birthday-candles', category: 'holiday', description: 'Торт со свечами и любимые песни на кухне.' },
 ];
-
-/** Демо-треки доступны и в мастере как обычные файлы — для проверки замены песни. */
-export const DEMO_TRACKS = [
-  { key: 'piano62', label: 'Камерное фортепиано · 62 BPM', title: 'Капли на стекле', genre: 'камерное фортепиано', mood: 'тихое, нежное', bpm: 62, scale: 'minor' as Scale, texture: 'piano' as SynthTexture, energy: 0.2 },
-  { key: 'ambient76', label: 'Эмбиент · 76 BPM', title: 'Высота 2800', genre: 'эмбиент', mood: 'воздушный, спокойный', bpm: 76, scale: 'major' as Scale, texture: 'ambient' as SynthTexture, energy: 0.35 },
-  { key: 'electro136', label: 'Электроника · 136 BPM', title: 'Стробоскоп', genre: 'электроника', mood: 'энергичный драйв', bpm: 136, scale: 'minor' as Scale, texture: 'electronic' as SynthTexture, energy: 0.9 },
-];
-
-export async function renderDemoTrack(t: { title: string; bpm: number; scale: Scale; texture: SynthTexture; energy: number }) {
-  return renderSynthWav({ bpm: t.bpm, scale: t.scale, texture: t.texture, energy: t.energy, seed: hashString(t.title) }, 24);
-}
 
 async function fetchDemoImage(name: string) {
   const res = await fetch(`/demo/${name}.jpg`);
@@ -118,7 +110,7 @@ export interface PreparedDay {
   blobs: { id: string; blob: Blob }[];
 }
 
-/** Подготовка демо-дня в браузере: снимки, трек, измерение и генерация — без записи в базу. */
+/** Подготовка демо-дня в браузере: снимки, композиция настроения, измерение и генерация — без записи в базу. */
 export async function prepareDemoDay(def: DemoDef): Promise<PreparedDay> {
   const id = demoMemoryId(def.key);
   const blobs: PreparedDay['blobs'] = [];
@@ -130,9 +122,6 @@ export async function prepareDemoDay(def: DemoDef): Promise<PreparedDay> {
     blobs.push({ id: blobId, blob: p.full }, { id: thumbBlobId, blob: p.thumb });
     photos.push({ id: `${id}:photo:${i}`, blobId, thumbBlobId, name: `${def.photos[i]}.jpg`, alt: p.alt, width: p.width, height: p.height, features: p.features });
   }
-  const wav = await renderDemoTrack(def.track);
-  const fileBlobId = `${id}:audio`;
-  blobs.push({ id: fileBlobId, blob: wav });
   const input: MemoryInput = {
     date: def.date,
     title: def.title,
@@ -144,21 +133,8 @@ export async function prepareDemoDay(def: DemoDef): Promise<PreparedDay> {
     place: { id: `${id}:place`, ...def.place },
     photos,
     coverId: photos[0].id,
-    song: {
-      source: 'file',
-      title: def.track.title,
-      artist: def.track.artist,
-      genre: def.track.genre,
-      mood: def.track.mood,
-      year: def.track.year,
-      bpm: def.track.bpm,
-      scale: def.track.scale,
-      fileBlobId,
-      fileName: `${def.track.title}.wav`,
-      fileType: 'audio/wav',
-      // Файл ещё не в базе — измеряем его напрямую.
-      audio: await analyzeAudioBlob(wav),
-    },
+    mood: def.mood,
+    song: catalogSong(trackForMood(def.mood)),
     voice: null,
   };
   const { generation, song } = await buildRelive(input, undefined, false);
@@ -179,6 +155,57 @@ export async function prepareDemoEvent(e: DemoEventDef, today = new Date()): Pro
 /** Демо, созданное версией до 1.1 (случайный id): узнаём по исходным файлам, а не по названию. */
 function isLegacyDemo(m: Memory, def: DemoDef) {
   return !!m.demo && !m.demoKey && m.photos[0]?.name === `${def.photos[0]}.jpg`;
+}
+
+/**
+ * Версия звука демо. 1 — синтез MOMENTA в WAV (до 1.2), 2 — композиции каталога.
+ * Хранится в meta: обновление выполняется один раз и после прерывания продолжается с того же места.
+ */
+export const DEMO_AUDIO_VERSION = 2;
+const OLD_DEMO_ARTIST = 'MOMENTA Demo';
+
+/** Звучит ли в дне старый демо-синтез (а не трек, выбранный автором). */
+export function hasLegacyDemoSound(m: Memory) {
+  return m.song?.source === 'file' && m.song.artist === OLD_DEMO_ARTIST && m.song.fileType === 'audio/wav';
+}
+
+export interface AudioUpgradeOptions {
+  today?: string;
+  rebuild?: (input: MemoryInput) => Promise<{ generation: Memory['generation']; song: MemoryInput['song'] }>;
+}
+
+/**
+ * Переводит установленные демо-дни на композиции каталога.
+ * — Удалённые демо не воскрешаются; отредактированные сохраняют текст, снимки, название и голос автора.
+ * — Меняется только старый демо-синтез; свой файл или ссылку автора не трогаем.
+ * — Запись заменяется, только если её не изменили за время пересборки (сравнение updatedAt в транзакции);
+ *   иначе правка остаётся, а обновление повторится при следующем запуске.
+ * — Межвкладочная блокировка общая с первым запуском: две вкладки не обновляют одно и то же.
+ */
+export async function upgradeDemoAudio(opts: AudioUpgradeOptions = {}): Promise<number> {
+  const { today = todayISO(), rebuild = (input) => buildRelive(input, undefined, false) } = opts;
+  let changed = 0;
+  const run = async () => {
+    if ((await getMeta<number>('demoAudio')) === DEMO_AUDIO_VERSION) return;
+    const all = await listMemories();
+    let raced = false;
+    for (const def of demoDefs(today)) {
+      const m = all.find((x) => x.id === demoMemoryId(def.key) || isLegacyDemo(x, def));
+      if (!m || !hasLegacyDemoSound(m)) continue;
+      const oldBlob = m.song!.fileBlobId;
+      const input: MemoryInput = { ...m, mood: m.mood ?? def.mood, song: catalogSong(trackForMood(m.mood ?? def.mood)) };
+      const { generation, song } = await rebuild(input);
+      const next = { ...toMemory(m.id, { ...input, song }, generation, m), demoKey: m.demoKey ?? def.key };
+      if (await replaceMemoryIfUnchanged(next, m.updatedAt, oldBlob ? [oldBlob] : [])) changed++;
+      else raced = true;
+    }
+    // День правили, пока шла пересборка: правку не трогаем, обновление повторится при следующем запуске.
+    if (!raced) await setMeta('demoAudio', DEMO_AUDIO_VERSION);
+  };
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (locks) await locks.request('momenta-demo-seed', run);
+  else await run();
+  return changed;
 }
 
 export interface SeedOptions {
@@ -209,6 +236,8 @@ export async function seedDemos(opts: SeedOptions = {}) {
       await insertCountdownIfAbsent(event, cover);
     }
     await setMeta('demoSeeded', true);
+    // Свежая установка сразу получает звук текущей версии — обновлять нечего.
+    if (!restore) await setMeta('demoAudio', DEMO_AUDIO_VERSION);
   };
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
   if (locks) await locks.request('momenta-demo-seed', run);
