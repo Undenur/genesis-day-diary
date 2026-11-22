@@ -1,15 +1,22 @@
 /**
  * Звук истории RE:LIVE. Запускается только действием пользователя.
  * Музыка: локальный файл (HTML Audio + анализ Web Audio) → прямая ссылка (с тайм-аутом) → синтез MOMENTA.
- * Голос: отдельная дорожка; пока звучит голос, музыка приглушается до 25%.
+ * Голос автора и системное чтение плавно приглушают музыку до 25% и возвращают уровень после завершения.
+ *
+ * Надёжность:
+ * — история — владелец звука (audioOwner): её запуск останавливает предпрослушивание;
+ * — каждый play() получает номер; после любого await устаревший вызов ничего не запускает;
+ * — при ошибке ссылки синтез подхватывает текущую позицию истории (getPositionMs).
  */
 import { classifyLink } from '../engine/audioAnalysis';
 import type { SongInput, SongProfile } from '../lib/types';
 import { hashString } from '../lib/util';
+import { claimAudio, ownsAudio, releaseAudio } from './audioOwner';
 import { probeAudioUrl } from './media';
 import { SynthEngine } from './synth';
 
 export type MusicMode = 'file' | 'link' | 'synth' | 'none';
+type DuckReason = 'voice' | 'speech';
 
 export interface AudioStatus {
   mode: MusicMode;
@@ -18,7 +25,21 @@ export interface AudioStatus {
   serviceUrl: string | null;
 }
 
+export interface StoryAudioOptions {
+  song: SongInput | null;
+  profile: SongProfile | null;
+  fileUrl: string | null;
+  voiceUrl: string | null;
+  fallbackBpm: number;
+  seedText: string;
+  /** Текущая позиция истории, мс — для подхвата синтезом */
+  getPositionMs: () => number;
+  /** Звук остановлен извне (другой владелец) — интерфейс должен показать паузу */
+  onPreempt?: () => void;
+}
+
 export class StoryAudio {
+  private o: StoryAudioOptions;
   private ctx: AudioContext | null = null;
   private musicEl: HTMLAudioElement | null = null;
   private voiceEl: HTMLAudioElement | null = null;
@@ -32,50 +53,39 @@ export class StoryAudio {
   private musicOn = true;
   private playing = false;
   private destroyed = false;
+  private seq = 0;
+  private token = 0;
+  private ducks = new Set<DuckReason>();
   status: AudioStatus;
   onVoiceEnd: (() => void) | null = null;
 
-  constructor(
-    private song: SongInput | null,
-    private profile: SongProfile | null,
-    private fileUrl: string | null,
-    private voiceUrl: string | null,
-    private fallbackBpm: number,
-    private seedText: string,
-  ) {
+  constructor(o: StoryAudioOptions) {
+    this.o = o;
     this.status = this.initialStatus();
   }
 
   private initialStatus(): AudioStatus {
-    const s = this.song;
+    const s = this.o.song;
     const name = s ? [s.title, s.artist].filter(Boolean).join(' — ') : '';
-    if (s?.source === 'file' && this.fileUrl) return { mode: 'file', label: `Оригинальный трек · ${name || s.fileName}`, note: null, serviceUrl: null };
+    if (s?.source === 'file' && this.o.fileUrl) return { mode: 'file', label: `Оригинальный трек · ${name || s.fileName}`, note: null, serviceUrl: null };
     if (s?.source === 'link' && s.url) {
       const kind = classifyLink(s.url);
       if (kind === 'audio') return { mode: 'link', label: `Трек по ссылке · ${name || 'аудио'}`, note: null, serviceUrl: s.url };
       return { mode: 'synth', label: this.synthLabel(), note: 'Страница музыкального сервиса не отдаёт звук напрямую — откройте оригинал или слушайте синтез.', serviceUrl: s.url };
     }
-    return { mode: 'synth', label: this.synthLabel(), note: s ? 'Файла нет — звучит синтез по описанию трека.' : null, serviceUrl: null };
+    return { mode: 'synth', label: this.synthLabel(), note: s ? 'Файла нет — звучит синтез по описанию трека.' : 'Песни нет — синтез играет в темпе, выведенном из текста.', serviceUrl: null };
   }
 
   private synthLabel() {
-    const p = this.profile;
-    const bpm = p?.bpm ?? this.fallbackBpm;
-    return `Синтез MOMENTA · ${bpm} BPM · ${p?.scale === 'major' ? 'мажор' : 'минор'}`;
+    const p = this.o.profile;
+    return `Синтез MOMENTA · ${p?.bpm ?? this.o.fallbackBpm} BPM · ${p?.scale === 'major' ? 'мажор' : 'минор'}`;
   }
 
   /** Для прямой ссылки проверяем доступность заранее (с тайм-аутом). */
   async prepare(): Promise<AudioStatus> {
-    if (this.status.mode === 'link' && this.song?.url) {
-      const r = await probeAudioUrl(this.song.url, 8000);
-      if (r !== 'ok') {
-        this.status = {
-          mode: 'synth',
-          label: this.synthLabel(),
-          note: r === 'timeout' ? 'Ссылка не ответила за 8 секунд — включён синтез.' : 'Ссылка недоступна или не является аудио — включён синтез.',
-          serviceUrl: this.song.url,
-        };
-      }
+    if (this.status.mode === 'link' && this.o.song?.url) {
+      const r = await probeAudioUrl(this.o.song.url, 8000);
+      if (r !== 'ok' && !this.destroyed) this.fallbackToSynth(r === 'timeout' ? 'Ссылка не ответила за 8 секунд — включён синтез.' : 'Ссылка недоступна или не является аудио — включён синтез.');
     }
     return this.status;
   }
@@ -86,7 +96,7 @@ export class StoryAudio {
     const ctx = new Ctx();
     this.ctx = ctx;
     this.musicGain = ctx.createGain();
-    this.musicGain.gain.value = this.musicOn ? this.musicVol : 0;
+    this.musicGain.gain.value = this.targetMusicVolume();
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 512;
     this.musicGain.connect(this.analyser);
@@ -95,88 +105,109 @@ export class StoryAudio {
     this.voiceGain.gain.value = this.voiceVol;
     this.voiceGain.connect(ctx.destination);
 
-    if (this.status.mode === 'file' && this.fileUrl) {
-      const el = new Audio(this.fileUrl);
+    if (this.status.mode === 'file' && this.o.fileUrl) {
+      const el = new Audio(this.o.fileUrl);
       el.loop = true;
       el.preload = 'auto';
       ctx.createMediaElementSource(el).connect(this.musicGain);
       this.musicEl = el;
-    } else if (this.status.mode === 'link' && this.song?.url) {
+    } else if (this.status.mode === 'link' && this.o.song?.url) {
       // Чужой сервер может не разрешать CORS — играем напрямую, без анализа.
-      const el = new Audio(this.song.url);
+      const el = new Audio(this.o.song.url);
       el.loop = true;
-      el.volume = this.musicOn ? this.musicVol : 0;
+      el.volume = this.targetMusicVolume();
       el.onerror = () => this.fallbackToSynth('Ссылка перестала отвечать — включён синтез.');
       this.musicEl = el;
     }
-    if (this.voiceUrl) {
-      const v = new Audio(this.voiceUrl);
+    if (this.o.voiceUrl) {
+      const v = new Audio(this.o.voiceUrl);
       v.preload = 'auto';
       ctx.createMediaElementSource(v).connect(this.voiceGain);
-      v.onended = () => {
-        this.duck(false);
-        this.onVoiceEnd?.();
-      };
+      v.onended = () => this.endVoice();
+      v.onerror = () => this.endVoice();
       this.voiceEl = v;
     }
     return ctx;
   }
 
+  private endVoice() {
+    this.duck('voice', false);
+    this.onVoiceEnd?.();
+  }
+
   private fallbackToSynth(note: string) {
     this.musicEl?.pause();
+    if (this.musicEl) this.musicEl.removeAttribute('src');
     this.musicEl = null;
     this.status = { ...this.status, mode: 'synth', label: this.synthLabel(), note };
-    if (this.playing) this.startSynth(0);
+    if (this.playing) this.startSynth(this.o.getPositionMs() / 1000);
   }
 
   private startSynth(offsetSec: number) {
     if (!this.ctx || !this.musicGain) return;
     this.synth?.stop();
-    const p = this.profile;
+    const p = this.o.profile;
     this.synth = new SynthEngine(this.ctx, this.musicGain, {
-      bpm: p?.bpm ?? this.fallbackBpm,
+      bpm: p?.bpm ?? this.o.fallbackBpm,
       energy: p?.energy ?? 0.4,
       scale: p?.scale ?? 'minor',
       texture: p?.texture ?? 'ambient',
-      seed: hashString(this.seedText),
+      seed: hashString(this.o.seedText),
     });
     this.synth.start(offsetSec);
   }
 
+  /** Запуск с позиции atMs. Устаревший вызов (после pause/повторного play) ничего не включит. */
   async play(atMs: number) {
     if (this.destroyed) return;
+    const seq = ++this.seq;
+    this.playing = true;
+    if (!ownsAudio(this.token)) {
+      this.token = claimAudio('story', () => {
+        this.pause();
+        this.o.onPreempt?.();
+      });
+    }
     const ctx = this.ensureCtx();
     if (ctx.state === 'suspended') await ctx.resume();
-    this.playing = true;
+    if (seq !== this.seq || !this.playing || this.destroyed) return;
     const sec = atMs / 1000;
     if (this.musicEl) {
-      const d = this.musicEl.duration;
-      this.musicEl.currentTime = Number.isFinite(d) && d > 0 ? sec % d : sec;
+      const el = this.musicEl;
+      const d = el.duration;
+      el.currentTime = Number.isFinite(d) && d > 0 ? sec % d : sec;
       try {
-        await this.musicEl.play();
+        await el.play();
       } catch {
-        if (this.status.mode === 'link') this.fallbackToSynth('Браузер не смог воспроизвести ссылку — включён синтез.');
+        if (seq === this.seq && this.status.mode === 'link') this.fallbackToSynth('Браузер не смог воспроизвести ссылку — включён синтез.');
+        return;
       }
+      // Устаревший вызов не трогает элемент, если новый play() уже идёт: останавливаем, только если история на паузе.
+      if (!this.playing || this.destroyed) el.pause();
     } else if (this.status.mode === 'synth') {
       this.startSynth(sec);
     }
   }
 
   pause() {
+    this.seq++;
     this.playing = false;
     this.musicEl?.pause();
     this.synth?.stop();
     this.synth = null;
     if (this.voiceEl && !this.voiceEl.paused) {
       this.voiceEl.pause();
-      this.duck(false);
-      this.onVoiceEnd?.();
+      this.endVoice();
     }
+    releaseAudio(this.token);
   }
 
   seek(ms: number) {
-    if (!this.playing) return;
-    this.play(ms);
+    if (this.playing) this.play(ms);
+  }
+
+  isPlaying() {
+    return this.playing;
   }
 
   setMusicOn(on: boolean) {
@@ -191,36 +222,57 @@ export class StoryAudio {
     if (this.voiceGain && this.ctx) this.voiceGain.gain.setTargetAtTime(voice, this.ctx.currentTime, 0.05);
   }
 
-  private ducked = false;
+  private targetMusicVolume() {
+    return this.musicOn ? this.musicVol * (this.ducks.size ? 0.25 : 1) : 0;
+  }
+
   private applyMusicVolume() {
-    const v = this.musicOn ? this.musicVol * (this.ducked ? 0.25 : 1) : 0;
-    if (this.musicGain && this.ctx) this.musicGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.12);
+    const v = this.targetMusicVolume();
+    // Плавно: ~0,4 с на приглушение и возврат.
+    if (this.musicGain && this.ctx) this.musicGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.14);
     if (this.status.mode === 'link' && this.musicEl) this.musicEl.volume = v;
   }
 
-  private duck(on: boolean) {
-    this.ducked = on;
+  /** Приглушение музыки под речь: голос автора или системное чтение. */
+  duck(reason: DuckReason, on: boolean) {
+    if (on) this.ducks.add(reason);
+    else this.ducks.delete(reason);
     this.applyMusicVolume();
   }
 
   async playVoice() {
-    if (!this.voiceUrl) return;
+    if (!this.o.voiceUrl) return;
     const ctx = this.ensureCtx();
     if (ctx.state === 'suspended') await ctx.resume();
-    if (!this.voiceEl) return;
+    if (!this.voiceEl || this.destroyed) return;
     this.voiceEl.currentTime = 0;
-    this.duck(true);
-    await this.voiceEl.play();
+    this.duck('voice', true);
+    try {
+      await this.voiceEl.play();
+    } catch (e) {
+      this.endVoice();
+      throw e;
+    }
   }
 
   stopVoice() {
     this.voiceEl?.pause();
-    this.duck(false);
+    this.duck('voice', false);
   }
 
-  /** Текущий уровень музыки 0..1 для пульса свечения. */
+  /** Позиция реально звучащего источника (с) и уровень 0..1 — для пульса свечения. */
+  probe(): { sec: number | null; level: number } {
+    if (!this.playing) return { sec: null, level: 0 };
+    let sec: number | null = null;
+    if (this.musicEl && !this.musicEl.paused) sec = this.musicEl.currentTime;
+    else if (this.synth) sec = this.synth.position();
+    return { sec, level: this.level() };
+  }
+
+  /** Текущий уровень музыки 0..1. */
   level(): number {
     if (!this.analyser || !this.playing) return 0;
+    if (this.status.mode === 'link') return 0.5; // без CORS сигнал недоступен
     this.analyser.getByteTimeDomainData(this.buf);
     let s = 0;
     for (let i = 0; i < this.buf.length; i++) {
@@ -231,13 +283,10 @@ export class StoryAudio {
   }
 
   destroy() {
+    this.pause();
     this.destroyed = true;
-    this.playing = false;
-    this.synth?.stop();
-    this.musicEl?.pause();
-    this.voiceEl?.pause();
-    if (this.musicEl) this.musicEl.src = '';
-    if (this.voiceEl) this.voiceEl.src = '';
+    if (this.musicEl) this.musicEl.removeAttribute('src');
+    if (this.voiceEl) this.voiceEl.removeAttribute('src');
     this.ctx?.close().catch(() => {});
     this.ctx = null;
   }

@@ -3,11 +3,12 @@ import { ArrowDownUp, ChevronRight, EighthNotes, GitCommitVertical, ListFilter, 
 import { useEffect, useLayoutEffect, useMemo } from 'react';
 import { Link } from 'react-router';
 import { Page } from '../components/Layout';
-import { Cover, MemoryTile, SoundToggle } from '../components/MemoryCard';
+import { Cover, MemoryTile, SoundToggle, markCoverForTransition } from '../components/MemoryCard';
+import { useMediaQuery } from '../hooks/useReducedMotion';
 import { Button, Chip, EmptyState, Segmented, inputCls } from '../components/ui';
 import { searchMemories, songLibrary } from '../lib/queries';
 import type { Category, Memory } from '../lib/types';
-import { CATEGORY_LABEL, MONTHS_NOM, formatDate, parseISODate, plural } from '../lib/util';
+import { CATEGORY_LABEL, MONTHS_NOM, formatDate, parseISODate, plural, typo } from '../lib/util';
 import { useData } from '../store/data';
 import { useUi, type MemoriesTab } from '../store/ui';
 
@@ -56,6 +57,7 @@ function Archive() {
   const list = useMemo(() => searchMemories(memories, f), [memories, f]);
   const selected = list.find((m) => m.id === f.selectedId) ?? list[0];
   const filtered = f.q || f.year || f.month;
+  const wide = useMediaQuery('(min-width: 1024px)');
 
   return (
     <div className="lg:grid lg:grid-cols-[1fr_340px] lg:gap-8">
@@ -76,7 +78,7 @@ function Archive() {
             </button>
           )}
         </div>
-        <div className="mt-3 flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           <ListFilter size={20} className="shrink-0 text-muted" aria-hidden="true" />
           <select aria-label="Год" className="min-h-10 rounded-full border border-line bg-card px-3 text-[14px]" value={f.year} onChange={(e) => setArchive({ year: e.target.value })}>
             <option value="">Все годы</option>
@@ -95,7 +97,8 @@ function Archive() {
             ))}
           </select>
           <Chip icon={ArrowDownUp} onClick={() => setArchive({ sort: f.sort === 'new' ? 'old' : 'new' })}>
-            {f.sort === 'new' ? 'Сначала новые' : 'Сначала старые'}
+            {f.sort === 'new' ? 'Новые' : 'Старые'}
+            <span className="sr-only"> сначала, нажмите, чтобы изменить порядок</span>
           </Chip>
         </div>
         <p className="mt-2 text-[13px] text-muted" aria-live="polite">
@@ -106,12 +109,7 @@ function Archive() {
           <ul className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
             {list.map((m) => (
               <li key={m.id}>
-                <span className="lg:hidden">
-                  <MemoryTile m={m} />
-                </span>
-                <span className="hidden lg:block">
-                  <MemoryTile m={m} selected={selected?.id === m.id} onSelect={() => setArchive({ selectedId: m.id })} />
-                </span>
+                {wide ? <MemoryTile m={m} selected={selected?.id === m.id} onSelect={() => setArchive({ selectedId: m.id })} /> : <MemoryTile m={m} />}
               </li>
             ))}
           </ul>
@@ -134,13 +132,13 @@ function Archive() {
 
 function PreviewPanel({ m }: { m: Memory }) {
   return (
-    <div className="sticky top-36 rounded-[22px] bg-card p-4">
-      <Cover m={m} thumb={false} className="aspect-[4/5] w-full rounded-[18px]" />
+    <div className="sticky top-36 rounded-[22px] bg-card p-4" data-vt-scope>
+      <Cover m={m} thumb={false} eager className="aspect-[4/5] w-full rounded-[18px]" />
       <p className="mt-4 text-[12px] font-semibold uppercase tracking-[0.12em] text-muted">{formatDate(m.date)}</p>
-      <h2 className="font-title mt-1 text-[22px] leading-tight">{m.title}</h2>
+      <h2 className="font-title mt-1 text-[22px] leading-tight [overflow-wrap:break-word] hyphens-auto">{typo(m.title)}</h2>
       <p className="mt-2 line-clamp-4 font-serif text-[15px] leading-relaxed text-muted">{m.text}</p>
       <div className="mt-4 flex gap-2">
-        <Link to={`/m/${m.id}`} className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-accent font-semibold text-night">
+        <Link to={`/m/${m.id}`} viewTransition onClick={markCoverForTransition} className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-accent font-semibold text-night active:scale-[0.98]">
           <Play size={18} fill="currentColor" aria-hidden="true" /> Открыть RE:LIVE
         </Link>
         <SoundToggle m={m} tone="card" />

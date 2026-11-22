@@ -57,6 +57,9 @@ export function App() {
   const init = useData((s) => s.init);
   const reduced = useReducedMotion();
   useEffect(() => {
+    document.documentElement.dataset.motion = reduced ? 'reduce' : 'full';
+  }, [reduced]);
+  useEffect(() => {
     init();
     // Просим браузер не вытеснять локальный архив при нехватке места.
     navigator.storage?.persist?.().catch(() => {});

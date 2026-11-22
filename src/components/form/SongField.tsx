@@ -53,6 +53,17 @@ export function SongField({ song, owner, onChange }: Props) {
 
   const profile = song && (song.title || song.genre || song.mood || song.fileBlobId || song.url || song.bpm) ? buildSongProfile(song) : null;
   const linkKind = s.url ? classifyLink(s.url) : null;
+  const genreMood = (
+    <>
+      <Field label="Жанр" htmlFor="song-genre">
+        <input id="song-genre" className={inputCls} value={s.genre} onChange={(e) => set({ genre: e.target.value })} placeholder="фортепиано, электроника, рок…" />
+      </Field>
+      <Field label="Характер звучания" htmlFor="song-mood">
+        <input id="song-mood" className={inputCls} value={s.mood} onChange={(e) => set({ mood: e.target.value })} placeholder="тихое, энергичное, мечтательное…" />
+      </Field>
+    </>
+  );
+
   const plays =
     !song
       ? null
@@ -140,28 +151,35 @@ export function SongField({ song, owner, onChange }: Props) {
         <Field label="Исполнитель" htmlFor="song-artist">
           <input id="song-artist" className={inputCls} value={s.artist} onChange={(e) => set({ artist: e.target.value })} />
         </Field>
-        <Field label="Жанр" htmlFor="song-genre">
-          <input id="song-genre" className={inputCls} value={s.genre} onChange={(e) => set({ genre: e.target.value })} placeholder="фортепиано, электроника, рок…" />
-        </Field>
-        <Field label="Характер звучания" htmlFor="song-mood">
-          <input id="song-mood" className={inputCls} value={s.mood} onChange={(e) => set({ mood: e.target.value })} placeholder="тихое, энергичное, мечтательное…" />
-        </Field>
-        <Field label="Год (по желанию)" htmlFor="song-year">
-          <input id="song-year" type="number" inputMode="numeric" min={1900} max={2100} className={inputCls} value={s.year ?? ''} onChange={(e) => set({ year: e.target.value ? Number(e.target.value) : undefined })} />
-        </Field>
-        <Field label="BPM (по желанию)" htmlFor="song-bpm" hint="Ручной BPM важнее измерения">
-          <input id="song-bpm" type="number" inputMode="numeric" min={40} max={220} className={inputCls} value={s.bpm ?? ''} onChange={(e) => set({ bpm: e.target.value ? Number(e.target.value) : undefined })} />
-        </Field>
+        {s.source === 'description' && genreMood}
       </div>
-      <Field label="Лад">
-        <div className="flex gap-2">
-          {([['', 'Не знаю'], ['major', 'Мажор'], ['minor', 'Минор']] as const).map(([v, l]) => (
-            <Chip key={v} active={(s.scale ?? '') === v} onClick={() => set({ scale: (v || undefined) as Scale | undefined })}>
-              {l}
-            </Chip>
-          ))}
+      {/* Дополнительные поля — по необходимости: для файла темп измеряется сам */}
+      <details open={!!(s.year || s.bpm || s.scale) || undefined} className="rounded-[18px] bg-card px-4 py-3 [&_summary::-webkit-details-marker]:hidden">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 text-[15px] font-semibold">
+          {s.source === 'description' ? 'Год, темп и лад' : 'Жанр, темп и лад'}
+          <span className="text-[13px] font-normal text-muted">по желанию</span>
+        </summary>
+        <div className="mt-3 flex flex-col gap-3 pb-1">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {s.source !== 'description' && genreMood}
+            <Field label="Год" htmlFor="song-year">
+              <input id="song-year" type="number" inputMode="numeric" min={1900} max={2100} className={inputCls} value={s.year ?? ''} onChange={(e) => set({ year: e.target.value ? Number(e.target.value) : undefined })} />
+            </Field>
+            <Field label="BPM" htmlFor="song-bpm" hint="Ручной BPM важнее измерения">
+              <input id="song-bpm" type="number" inputMode="numeric" min={40} max={220} className={inputCls} value={s.bpm ?? ''} onChange={(e) => set({ bpm: e.target.value ? Number(e.target.value) : undefined })} />
+            </Field>
+          </div>
+          <Field label="Лад">
+            <div className="flex gap-2">
+              {([['', 'Не знаю'], ['major', 'Мажор'], ['minor', 'Минор']] as const).map(([v, l]) => (
+                <Chip key={v} active={(s.scale ?? '') === v} onClick={() => set({ scale: (v || undefined) as Scale | undefined })}>
+                  {l}
+                </Chip>
+              ))}
+            </div>
+          </Field>
         </div>
-      </Field>
+      </details>
 
       {plays && (
         <div className={`rounded-2xl px-4 py-3 text-[14px] ${plays.real ? 'bg-ok/10 text-ok' : 'bg-raised text-ink'}`} role="status">

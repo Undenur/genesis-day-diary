@@ -33,7 +33,9 @@ export function searchMemories(list: Memory[], f: ArchiveFilter): Memory[] {
         .filter(Boolean)
         .join(' '),
     );
-    return words.every((w) => hay.includes(w));
+    // Совпадение по началу слова: «лёд» находит «ледяной», но не «последним».
+    const tokens = hay.split(/[^\p{L}\p{N}]+/u);
+    return words.every((w) => tokens.some((t) => t.startsWith(w)));
   });
   return out.sort((a, b) => (f.sort === 'new' ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date)));
 }

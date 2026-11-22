@@ -17,6 +17,8 @@ export interface BlobRecord {
 export interface DraftRecord {
   id: string;
   step: number;
+  /** Версия последовательности шагов мастера (нет у черновиков до 1.1) */
+  flow?: number;
   input: MemoryInput;
   memoryId: string;
   generation: Generation | null;
@@ -199,18 +201,26 @@ export async function setMeta(key: string, value: unknown) {
  * Удаляет «осиротевшие» файлы: черновые медиа брошенных правок и т. п.
  * Вызывается при старте, до открытия мастера.
  */
-export async function collectGarbage() {
+export const GC_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Удаляет «осиротевшие» файлы старше часа. Свежие файлы не трогаем: другая вкладка может прямо сейчас
+ * импортировать фото в черновик или собирать демо-день — ссылка на них появится чуть позже.
+ * Всё делается в одной транзакции, поэтому ссылки и удаление согласованы.
+ */
+export async function collectGarbage(now = Date.now()) {
   const d = await db();
+  const tx = d.transaction(['memories', 'countdowns', 'drafts', 'blobs'], 'readwrite');
   const used = new Set<string>();
-  for (const m of await d.getAll('memories')) memoryBlobIds(m).forEach((id) => used.add(id));
-  for (const c of await d.getAll('countdowns')) if (c.coverBlobId) used.add(c.coverBlobId);
-  const draft = await d.get('drafts', 'current');
+  for (const m of await tx.objectStore('memories').getAll()) memoryBlobIds(migrateMemory(m)).forEach((id) => used.add(id));
+  for (const c of await tx.objectStore('countdowns').getAll()) if (c.coverBlobId) used.add(c.coverBlobId);
+  const draft = await tx.objectStore('drafts').get('current');
   if (draft) memoryBlobIds(draft.input).forEach((id) => used.add(id));
-  const tx = d.transaction('blobs', 'readwrite');
-  let cursor = await tx.store.openCursor();
+  let cursor = await tx.objectStore('blobs').openCursor();
   let removed = 0;
   while (cursor) {
-    if (!used.has(cursor.key)) {
+    const age = now - (Date.parse(cursor.value.createdAt) || 0);
+    if (!used.has(cursor.key) && age > GC_GRACE_MS) {
       await cursor.delete();
       removed++;
     }
@@ -218,6 +228,44 @@ export async function collectGarbage() {
   }
   await tx.done;
   return removed;
+}
+
+/**
+ * Записать день вместе с файлами, только если дня с таким id ещё нет.
+ * Проверка и запись — в одной транзакции, поэтому две вкладки не создадут дубль,
+ * а уже существующий (возможно, отредактированный) день останется нетронутым.
+ */
+export async function insertMemoryIfAbsent(memory: Memory, blobs: { id: string; blob: Blob }[]): Promise<boolean> {
+  const d = await db();
+  const tx = d.transaction(['memories', 'blobs'], 'readwrite');
+  try {
+    if (await tx.objectStore('memories').get(memory.id)) {
+      await tx.done;
+      return false;
+    }
+    const at = new Date().toISOString();
+    for (const b of blobs) await tx.objectStore('blobs').put({ id: b.id, blob: b.blob, owner: memory.id, createdAt: at });
+    await tx.objectStore('memories').put(memory);
+    await tx.done;
+    return true;
+  } catch (e) {
+    try { tx.abort(); } catch { /* уже завершена */ }
+    if (isQuota(e)) throw new StorageFullError();
+    throw e;
+  }
+}
+
+export async function insertCountdownIfAbsent(ev: CountdownEvent, cover: { id: string; blob: Blob } | null): Promise<boolean> {
+  const d = await db();
+  const tx = d.transaction(['countdowns', 'blobs'], 'readwrite');
+  if (await tx.objectStore('countdowns').get(ev.id)) {
+    await tx.done;
+    return false;
+  }
+  if (cover) await tx.objectStore('blobs').put({ id: cover.id, blob: cover.blob, owner: ev.id, createdAt: new Date().toISOString() });
+  await tx.objectStore('countdowns').put(ev);
+  await tx.done;
+  return true;
 }
 
 export async function wipeAll() {

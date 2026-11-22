@@ -127,10 +127,9 @@ export function ProfileScreen() {
           variant="outline"
           icon={RotateCcw}
           onClick={async () => {
-            await setMeta('demoSeeded', false);
             const { seedDemos } = await import('../services/demo');
             toast('Готовлю демо-дни…');
-            await seedDemos();
+            await seedDemos({ restore: true });
             await useData.getState().reload();
             toast('Демо-дни добавлены', 'ok');
           }}

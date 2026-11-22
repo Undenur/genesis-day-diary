@@ -8,17 +8,22 @@
  * Нормализация: каждый вклад приводится к 0..1, параметр = round(100 · Σ wᵢ·vᵢ / Σ wᵢ).
  * Если источника нет (нет песни) — его вес перераспределяется пропорционально остальным.
  * Значения, взятые из описания трека, а не из сигнала, помечаются estimated = true.
+ *
+ * Режиссура (1.1): общая форма серии — открытие (место), середина (деталь), финал (время на фразу).
+ * Внутри формы меняются масштаб, направление камеры, выдержка, переход и фактура — только по сигналам.
+ * У кадра один ведущий приём, сила остальных ограничена и меняется плавно вместе с Emotion DNA.
  */
 import type {
-  ArtDirection, ArtEffect, ArtStyle, Explanation, Generation, ParamDetail, ParamKey, ParamPart,
-  PhotoFeatures, Scene, Season, Shot, SongProfile, Weather,
+  ArtDirection, ArtEffect, ArtLead, ArtStyle, Explanation, Generation, ParamDetail, ParamKey, ParamPart,
+  PhotoFeatures, Reason, Scene, Season, Shot, SongProfile, Weather,
 } from '../lib/types';
-import { clamp, colorName, hashString, lerp, liftColor, plural, rng, round } from '../lib/util';
+import { clamp, colorName, countWords, hashString, hexToRgb, lerp, liftColor, plural, rng, round, toHex } from '../lib/util';
+import { TARGET_NORMAL, relLuminance, shadeFor, zoneCost, zoneOf } from './legibility';
 import { freeSide, hueDist } from './photoAnalysis';
 import { analyzeText, extractPhrases, type TextAnalysis } from './textAnalysis';
 import { suggestTitle } from './title';
 
-export const ALGORITHM_VERSION = 'momenta-dna-1.0';
+export const ALGORITHM_VERSION = 'momenta-dna-1.1';
 
 export interface GeneratorInput {
   text: string;
@@ -45,6 +50,9 @@ export const WEIGHTS: Record<ParamKey, { text: number; photo: number; music: num
 const f2 = (v: number) => v.toLocaleString('ru-RU', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
 const sec = (ms: number) => (ms / 1000).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' с';
 const quote = (words: string[], n = 2) => words.slice(0, n).map((w) => `«${w.toLowerCase()}»`).join(', ');
+const bars = (n: number) => `${n} ${plural(n, ['такт', 'такта', 'тактов'])}`;
+
+const STYLE_LEAD: Record<ArtStyle, ArtLead> = { impressionism: 'light', kandinsky: 'geometry', minimal: 'air' };
 
 export function generateRelive(input: GeneratorInput): Generation {
   const inputHash = hashString(
@@ -55,7 +63,7 @@ export function generateRelive(input: GeneratorInput): Generation {
       s: input.season,
       w: input.weather,
       p: input.placeName,
-      ph: input.photos.map((p) => [p.palette.map((c) => c.hex), p.brightness, p.contrast, p.detailGrid, p.warmth]),
+      ph: input.photos.map((p) => [p.palette.map((c) => c.hex), p.brightness, p.contrast, p.detailGrid, p.warmth, p.zones, p.light]),
       c: input.coverIndex,
       m: input.song,
     }),
@@ -79,7 +87,7 @@ export function generateRelive(input: GeneratorInput): Generation {
     warmth: {
       photo: { v: (photoAgg.warmth + 1) / 2, note: `тёплые/холодные тона кадров ${f2(photoAgg.warmth)}` },
       text: { v: (a.warmth + 1) / 2, note: a.details.length || a.seasonHits.length ? `ассоциации текста: ${quote([...a.details.map((d) => d.word), ...a.seasonHits.map((s) => s.word)])}` : 'нейтральный текст' },
-      music: song ? { v: musicWarmth(song), note: `${song.scale === 'major' ? 'мажор' : 'минор'}, мягкость ${f2(song.softness)}` } : null,
+      music: song ? { v: musicWarmth(song), note: `${song.scale === 'major' ? 'мажор' : 'минор'}${song.scaleSource === 'manual' ? '' : ' (предположение)'}, мягкость ${f2(song.softness)}` } : null,
     },
     energy: {
       music: song ? { v: song.energy, note: `энергия трека ${f2(song.energy)}${song.energySource === 'measured' ? ' (измерено)' : ' (оценка по описанию)'}` } : null,
@@ -109,11 +117,7 @@ export function generateRelive(input: GeneratorInput): Generation {
     const parts: ParamPart[] = [];
     const srcs = sources[key] as Record<'text' | 'photo' | 'music', { v: number; note: string } | null>;
     let wSum = 0;
-    for (const src of ['text', 'photo', 'music'] as const) {
-      const s = srcs[src];
-      if (!s) continue;
-      wSum += WEIGHTS[key][src];
-    }
+    for (const src of ['text', 'photo', 'music'] as const) if (srcs[src]) wSum += WEIGHTS[key][src];
     let acc = 0;
     for (const src of ['text', 'photo', 'music'] as const) {
       const s = srcs[src];
@@ -144,24 +148,30 @@ export function generateRelive(input: GeneratorInput): Generation {
       : { topic: 'title', source: 'text', text: `Название «${suggested.title}» собрано из записи: ${suggested.reason}.` },
   );
 
-  // ---------- Палитра ----------
+  // ---------- Палитра и свет кадра ----------
   const palette = cover.palette.map((c) => c.hex);
   const glow = pickGlow(cover, W);
-  // Оттенок — из кадра; слишком тёмный тон осветляется, чтобы свечение было видно и на ночной сцене.
   const glowHex = liftColor(glow.hex, 0.56, 0.42);
   const accent = liftColor(cover.palette.find((c) => c.hex !== glow.hex && c.s > 0.15)?.hex ?? glow.hex, 0.5, 0.35);
+  const light = cover.light ?? { x: 0.7, y: 0.25, strength: 0.3 };
+  // Тёмный кадр получает меньше свечения — его тени остаются тенями; светлый — меньше виньетки, больше воздуха.
+  const glowRoom = round(clamp(0.28 + cover.brightness * 1.1, 0.3, 1), 2);
+  const vignette = round(clamp(0.1 + (1 - cover.brightness) * 0.32 + N * 0.12, 0.1, 0.5), 2);
   explanations.push({
     topic: 'palette',
     source: 'photo',
-    text: `Свечение — ${colorName(glow.h, glow.s, glow.l)} ${glow.hex}${glowHex !== glow.hex ? ` (осветлён до ${glowHex})` : ''}: взят из обложки, где занимает ${Math.round(glow.weight * 100)}% площади. Warmth ${params.warmth} ${W >= 0.55 ? 'сдвигает выбор к тёплым тонам кадра' : W <= 0.45 ? 'сдвигает выбор к холодным тонам кадра' : 'держит баланс тёплого и холодного'}.`,
+    text: `Свечение — ${colorName(glow.h, glow.s, glow.l)} ${glow.hex}${glowHex !== glow.hex ? ` (для свечения осветлён до ${glowHex})` : ''}: взят из обложки, где занимает ${Math.round(glow.weight * 100)}% площади, и идёт из ${areaName(light.x, light.y)} — самой светлой области кадра. Сила свечения ${Math.round(glowRoom * 100)}%: ${cover.brightness < 0.3 ? 'тёмный кадр сохраняет глубокие тени' : cover.brightness > 0.55 ? 'светлому кадру оставлен воздух' : 'средняя яркость кадра'}.`,
   });
 
   // ---------- Ритм ----------
   const bpm = song?.bpm ?? Math.round(64 + a.dynamics * 64);
   const beatMs = 60000 / bpm;
   const barMs = beatMs * 4;
+  // Пульс «по атакам» — только когда реальный файл даёт различимые атаки; иначе спокойное дыхание.
+  const pulseMode: 'attack' | 'breath' = song?.measured && song.bpmSource !== 'description' && song.attackDensity >= 0.35 && song.texture !== 'ambient' ? 'attack' : 'breath';
+  const beatOffsetMs = pulseMode === 'attack' ? Math.round((song?.beatOffsetSec ?? 0) * 1000) : 0;
 
-  // ---------- Художественный приём ----------
+  // ---------- Ведущий приём и плавная сила слоёв ----------
   const night = a.timeOfDay?.key === 'night' || a.events.some((e) => ['концерт', 'вечеринка', 'фестиваль'].includes(e.entry.key)) || a.places.some((p) => p.entry.key === 'клуб');
   const percussive = !!song && (song.attackDensity > 0.45 || song.texture === 'electronic');
   const scores: Record<ArtStyle, number> = {
@@ -170,82 +180,94 @@ export function generateRelive(input: GeneratorInput): Generation {
     minimal: I * 0.35 + (input.photos.length <= 2 ? 0.2 : 0) + (1 - D) * 0.3 + (a.calmWords.length ? 0.05 : 0),
   };
   const style = (Object.keys(scores) as ArtStyle[]).reduce((x, y) => (scores[y] > scores[x] ? y : x));
-  explanations.push({ topic: 'style', source: 'estimate', text: styleReason(style, { E, D, I, night, percussive, contrast: cover.contrast, calm: a.calmWords, song, photos: input.photos.length }) });
+  // softmax: соседние значения Emotion DNA меняют силу слоёв постепенно, без скачков.
+  const T = 0.12;
+  const ex = (Object.keys(scores) as ArtStyle[]).map((k) => [k, Math.exp(scores[k] / T)] as const);
+  const exMax = Math.max(...ex.map(([, v]) => v));
+  const share = Object.fromEntries(ex.map(([k, v]) => [k, v / exMax])) as Record<ArtStyle, number>;
 
-  // ---------- Эффекты (каждому — сигнал во входных данных) ----------
   const effects = pickEffects(a, input, cover, season, W);
+  const topEffect = effects[0];
+  const textureLead = !!topEffect && topEffect.strength >= 4;
+  const lead: ArtLead = textureLead ? 'texture' : STYLE_LEAD[style];
+  const cap = (v: number, isLead: boolean) => round(isLead ? 1 : Math.min(0.4, v * 0.6), 2);
+  const intensity = {
+    light: cap(share.impressionism, lead === 'light'),
+    geometry: cap(share.kandinsky, lead === 'geometry'),
+    air: cap(share.minimal, lead === 'air'),
+    effects: textureLead ? 1 : round(Math.min(0.45, (topEffect?.strength ?? 0) / 8), 2),
+  };
+  explanations.push({ topic: 'style', source: 'estimate', text: `${styleReason(style, { E, D, I, night, percussive, contrast: cover.contrast, calm: a.calmWords, song, photos: input.photos.length })} ${textureLead ? `Ведущий приём — фактура «${EFFECT_NAME[topEffect.effect]}», геометрия и свет приглушены.` : 'Остальные слои ослаблены, чтобы у кадра был один голос.'}` });
   for (const e of effects) explanations.push({ topic: 'effect', source: e.source, text: e.reason });
 
-  // ---------- Оформление ----------
-  const side = freeSide(cover);
-  const capRegion = side.side === 'left' ? cover.regionBrightness.left : cover.regionBrightness.right;
-  const shadeStrength = round(clamp(0.3 + capRegion * 0.45 + cover.regionBrightness.bottom * 0.25, 0.3, 0.92), 2);
-  explanations.push({
-    topic: 'layout',
-    source: 'photo',
-    text: `${
-      Math.abs(side.left - side.right) < 0.06
-        ? `Детали снимка распределены почти поровну (слева ${f2(side.left)}, справа ${f2(side.right)}) — подпись стоит ${side.side === 'left' ? 'слева' : 'справа'}, где деталей чуть меньше.`
-        : `Подпись стоит ${side.side === 'left' ? 'слева' : 'справа'}, потому что основные детали снимка ${side.side === 'left' ? 'справа' : 'слева'} (детализация ${side.side === 'left' ? `справа ${f2(side.right)} против ${f2(side.left)} слева` : `слева ${f2(side.left)} против ${f2(side.right)} справа`}).`
-    } Затемнение под текстом ${Math.round(shadeStrength * 100)}% — яркость этой области ${f2(capRegion)}.`,
-  });
-
-  let transitionMs = lerp(1750, 380, E) * (1 + (song ? (song.softness - 0.5) * 0.3 : 0)) * (1 + N * 0.15);
+  // ---------- Переходы ----------
+  const baseTransition = lerp(1750, 380, E) * (1 + (song ? (song.softness - 0.5) * 0.3 : 0)) * (1 + N * 0.15);
+  let transitionMs = baseTransition;
   const slowWords = a.calmWords.filter((w) => /неспешн|медленн|нетороп|плавн|лениво|размерен/i.test(w));
   if (slowWords.length) transitionMs *= 1.18;
   transitionMs = clamp(Math.round(transitionMs / (beatMs / 4)) * (beatMs / 4), 280, 2400);
+  const transitionBase = clamp(Math.round(baseTransition / (beatMs / 4)) * (beatMs / 4), 280, 2400);
+  const musicDrive = !!song && song.energy >= 0.5 && song.attackDensity >= 0.4;
   explanations.push({
     topic: 'rhythm',
     source: song ? 'music' : 'estimate',
-    text: `${song ? `Трек на ${bpm} BPM` : `Без песни темп ${bpm} BPM выведен из динамики текста`}: доля ${sec(beatMs)}, такт ${sec(barMs)} — шаг монтажа кратен такту. Переход ${sec(transitionMs)}: Energy ${params.energy}${song ? `, мягкость трека ${f2(song.softness)}` : ''}${slowWords.length ? `, слово ${quote(slowWords, 1)} удлинило растворение` : ''}.`,
+    text: `${tempoSourceText(song, bpm, a.dynamics)}: доля ${sec(beatMs)}, такт ${sec(barMs)} — шаг монтажа кратен такту. Переход ${sec(transitionMs)}: Energy ${params.energy}${song ? `, мягкость трека ${f2(song.softness)}` : ''}${slowWords.length ? `, слово ${quote(slowWords, 1)} удлинило растворение` : ''}. ${pulseMode === 'attack' ? `Пульс идёт по атакам файла${beatOffsetMs ? ` со смещением сетки ${sec(beatOffsetMs)}` : ''}.` : 'Пульс — спокойное дыхание: у трека нет уверенно различимых атак или темп оценён.'}`,
   });
 
   const filterFor = (s: ArtStyle) => {
     const hue = round((0.5 - W) * 14, 1);
-    if (s === 'kandinsky') return `saturate(${round(1.12 + E * 0.25, 2)}) contrast(${round(1.06 + E * 0.14, 2)}) brightness(0.97) hue-rotate(${hue}deg)`;
-    if (s === 'impressionism') return `saturate(${round(1.02 + W * 0.12, 2)}) contrast(0.9) brightness(1.05) sepia(${round(N * 0.28, 2)}) hue-rotate(${hue}deg)`;
-    return `saturate(0.86) contrast(1.03) brightness(1.02) sepia(${round(N * 0.16, 2)}) hue-rotate(${hue}deg)`;
+    if (s === 'kandinsky') return `saturate(${round(1.08 + E * 0.2, 2)}) contrast(${round(1.04 + E * 0.1, 2)}) brightness(0.98) hue-rotate(${hue}deg)`;
+    if (s === 'impressionism') return `saturate(${round(1.02 + W * 0.1, 2)}) contrast(0.93) brightness(1.03) sepia(${round(N * 0.22, 2)}) hue-rotate(${hue}deg)`;
+    return `saturate(0.9) contrast(1.02) brightness(1.01) sepia(${round(N * 0.14, 2)}) hue-rotate(${hue}deg)`;
   };
 
+  // ---------- Сцены ----------
+  const { phrases, finale } = extractPhrases(a);
+  const scenes = buildScenes(input, { E, D, I, barMs, beatMs, rand, phrases, finale, musicDrive, calm: a.dynamics < 0.35 });
+  const totalMs = scenes.reduce((s, x) => s + x.durationMs, 0);
+
+  const opening = scenes[0];
   const art: ArtDirection = {
     style,
     effects: effects.map((e) => e.effect),
     palette,
     glowColor: glowHex,
     accent,
-    grain: round(clamp(N * 0.85 + (style === 'impressionism' ? 0.12 : 0)), 2),
+    grain: round(clamp(N * 0.85 + (style === 'impressionism' ? 0.12 : 0)) * (lead === 'air' ? 1 : 0.75), 2),
     softness: round(clamp(N * 0.6 + (song?.softness ?? 0.5) * 0.4), 2),
-    glowAmp: round(0.15 + E * 0.85, 2),
+    glowAmp: round((0.15 + E * 0.85) * glowRoom, 2),
     motionAmp: round(0.3 + E * 0.7, 2),
-    particleCount: Math.round(10 + D * 50),
+    particleCount: Math.round(10 + D * 40),
     tiltDeg: round((E - 0.5) * 2 * (style === 'kandinsky' ? 14 : 5) * (rand() > 0.5 ? 1 : -1), 1),
     titleGap: Math.round(10 + (1 - D) * 22),
     titleSize: Math.round(28 + I * 14),
     transitionMs: Math.round(transitionMs),
     pulseMs: Math.round(beatMs),
-    captionAlign: side.side,
-    shadeStrength,
+    captionAlign: opening.textSide ?? 'left',
+    shadeStrength: opening.shade ?? 0.5,
     photoFilter: filterFor(style),
+    lead,
+    intensity,
+    light: { x: light.x, y: light.y },
+    pulseMode,
+    beatOffsetMs,
+    vignette,
+    glowRoom,
   };
 
+  explanations.push(layoutExplanation(scenes, input.photos));
   explanations.push({
     topic: 'param',
     source: 'estimate',
     text: `Nostalgia ${params.nostalgia} → зерно ${Math.round(art.grain * 100)}% и мягкость ${Math.round(art.softness * 100)}%. Intimacy ${params.intimacy} → кадрирование ближе и подпись ${art.titleSize} px. Density ${params.density} → ${art.particleCount} ${plural(art.particleCount, ['деталь', 'детали', 'деталей'])} в сцене и интервал ${art.titleGap} px между заголовком и подписью.`,
   });
-
   if (a.negations.length) {
     explanations.push({ topic: 'caption', source: 'text', text: `Отрицание учтено: ${quote(a.negations, 3)} — смысл не перевёрнут, слово не засчитано как противоположная эмоция.` });
   }
-
-  // ---------- Сцены ----------
-  const { phrases, finale } = extractPhrases(a);
-  const scenes = buildScenes(input, { E, D, I, barMs, beatMs, rand, phrases, finale });
-  const totalMs = scenes.reduce((s, x) => s + x.durationMs, 0);
   explanations.push({
     topic: 'rhythm',
     source: 'estimate',
-    text: `${scenes.length} ${scenes.length === 3 ? 'сцены' : scenes.length === 4 ? 'сцены' : 'сцен'} на ${sec(totalMs)}: ${scenes.map((s) => `${s.bars} ${s.bars === 1 ? 'такт' : s.bars < 5 ? 'такта' : 'тактов'}`).join(' · ')}. Цель по Energy ${params.energy}: ${E > 0.55 ? 'короче и плотнее' : 'длиннее и спокойнее'}.`,
+    text: `${scenes.length} ${plural(scenes.length, ['сцена', 'сцены', 'сцен'])} на ${sec(totalMs)}: ${scenes.map((s) => bars(s.bars)).join(' · ')}. Открытие показывает место${scenes[0].shots[0].camera === 'pan' ? ' неторопливой панорамой' : scenes[0].shots[0].camera === 'hold' ? ' неподвижно' : ''}, середина подводит к детали, финал держит фразу ${sec(scenes[scenes.length - 1].durationMs)}.${musicDrive ? ` Энергичный трек уплотнил монтаж: кадры сменяются на атаках, а композиция осталась${a.dynamics < 0.35 ? ' камерной, как в тексте' : ' прежней'}.` : ''}`,
   });
   const captions = scenes.map((s) => s.caption).filter(Boolean) as string[];
   if (captions.length) {
@@ -254,8 +276,10 @@ export function generateRelive(input: GeneratorInput): Generation {
   explanations.push({
     topic: 'sound',
     source: song ? 'music' : 'estimate',
-    text: song ? song.notes.join('. ') + `. Пульс свечения — каждые ${sec(beatMs)}, амплитуда ${Math.round(art.glowAmp * 100)}%.` : 'Песня не указана: синтез MOMENTA соберёт фон из темпа и настроения текста.',
+    text: song ? song.notes.join('. ') + `. Пульс свечения — каждые ${sec(beatMs)}, амплитуда ${Math.round(art.glowAmp * 100)}%.` : `Песня не указана: синтез MOMENTA играет в темпе ${bpm} BPM, выведенном из динамики текста (${f2(a.dynamics)}).`,
   });
+
+  const reasons = buildReasons({ a, slowWords, transitionMs, transitionBase, glow, light, song, bpm, barMs, scenes, captions });
 
   return {
     algorithmVersion: ALGORITHM_VERSION,
@@ -273,6 +297,7 @@ export function generateRelive(input: GeneratorInput): Generation {
     captions,
     explanations,
     song,
+    reasons,
     textSummary: {
       places: a.places.map((p) => p.word),
       events: a.events.map((e) => e.word),
@@ -286,6 +311,82 @@ export function generateRelive(input: GeneratorInput): Generation {
       dynamics: round(a.dynamics, 2),
       valence: round(a.valence, 2),
     },
+  };
+}
+
+const EFFECT_NAME: Record<ArtEffect, string> = {
+  'amber-halo': 'янтарные ореолы',
+  'silver-shimmer': 'серебристое мерцание',
+  'light-particles': 'светлые частицы',
+  'organic-forms': 'органические формы',
+  'muted-reflections': 'отражения за стеклом',
+};
+
+function areaName(x: number, y: number) {
+  const v = y < 0.34 ? 'верхней' : y > 0.66 ? 'нижней' : 'средней';
+  const h = x < 0.34 ? 'левой' : x > 0.66 ? 'правой' : 'центральной';
+  return h === 'центральной' && v === 'средней' ? 'центра' : `${v} ${h} части`;
+}
+
+function tempoSourceText(song: SongProfile | null, bpm: number, dynamics: number) {
+  if (!song) return `Без песни темп ${bpm} BPM выведен из динамики текста ${f2(dynamics)}`;
+  switch (song.bpmSource) {
+    case 'measured':
+      return `${bpm} BPM измерены по файлу (уверенность ${Math.round(song.bpmConfidence * 100)}%)`;
+    case 'manual':
+      return `${bpm} BPM указаны вручную`;
+    case 'description':
+      return `${bpm} BPM — оценка по описанию трека`;
+    default:
+      return `Темп трека неизвестен — взяты нейтральные ${bpm} BPM`;
+  }
+}
+
+/** До трёх коротких причин: фраза автора, цвет из кадра, источник темпа. Каждая описывает применённое решение. */
+function buildReasons(c: {
+  a: TextAnalysis;
+  slowWords: string[];
+  transitionMs: number;
+  transitionBase: number;
+  glow: PhotoFeatures['palette'][number];
+  light: { x: number; y: number };
+  song: SongProfile | null;
+  bpm: number;
+  barMs: number;
+  scenes: Scene[];
+  captions: string[];
+}): Reason[] {
+  const out: Reason[] = [];
+  const fin = c.scenes[c.scenes.length - 1];
+  if (c.slowWords.length && c.transitionMs !== c.transitionBase) {
+    out.push({ kind: 'phrase', text: `Ваше «${c.slowWords[0].toLowerCase()}» удлинило переходы: ${sec(c.transitionBase)} → ${sec(c.transitionMs)}.` });
+  } else if (c.a.movementWords.length) {
+    out.push({ kind: 'phrase', text: `Слова ${quote(c.a.movementWords)} подняли динамику текста до ${f2(c.a.dynamics)} — движение камеры смелее.` });
+  } else if (fin.caption) {
+    out.push({ kind: 'phrase', text: `Финал держит вашу фразу «${fin.caption}» ${sec(fin.durationMs)} — время прочесть.` });
+  }
+  out.push({ kind: 'color', color: c.glow.hex, text: `${cap1(colorName(c.glow.h, c.glow.s, c.glow.l))} ${c.glow.hex} из ${areaName(c.light.x, c.light.y)} обложки стал цветом свечения.` });
+  const middleBars = c.scenes.slice(1, -1).map((s) => s.bars);
+  const scale = c.song && c.song.scaleSource !== 'manual' ? ` Лад «${c.song.scale === 'minor' ? 'минор' : 'мажор'}» — предположение по описанию.` : '';
+  out.push({ kind: 'tempo', text: `${tempoSourceText(c.song, c.bpm, c.a.dynamics)} → такт ${sec(c.barMs)}, середина по ${bars(Math.max(...middleBars, 1))}.${c.song?.bpmSource === 'measured' ? '' : scale}` });
+  return out.slice(0, 3);
+}
+
+const cap1 = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+function layoutExplanation(scenes: Scene[], photos: PhotoFeatures[]): Explanation {
+  const first = scenes[0];
+  const f = photos[first.shots[0].photoIndex];
+  const other = first.textSide === 'left' ? 'right' : 'left';
+  const zSide = zoneOf(f, first.textSide ?? 'left');
+  const zOther = zoneOf(f, other);
+  const minRatio = Math.min(...scenes.map((s) => s.contrast ?? 0));
+  const switches = scenes.map((s, i) => (i > 0 && s.textSide !== scenes[i - 1].textSide ? i + 1 : null)).filter(Boolean);
+  const balanced = Math.abs(zoneCost(zSide) - zoneCost(zOther)) < 0.05;
+  return {
+    topic: 'layout',
+    source: 'photo',
+    text: `${balanced ? `Фон под подписью почти одинаков с обеих сторон (детали ${f2(zSide.detail)} и ${f2(zOther.detail)})` : `Подпись открытия стоит ${first.textSide === 'left' ? 'слева' : 'справа'}: там меньше перепадов и светлых пятен (детали ${f2(zSide.detail)} против ${f2(zOther.detail)})`}. Карта деталей измеряет перепады изображения, а не распознаёт предметы. Подложка в каждой сцене подобрана по светлым участкам зоны текста: худший контраст ${f2(minRatio)}:1 при норме 4,5:1.${switches.length ? ` В сцене ${switches.join(', ')} подпись переходит на другую сторону — там фон заметно спокойнее.` : ''}`,
   };
 }
 
@@ -331,9 +432,15 @@ function pickGlow(cover: PhotoFeatures, W: number) {
   const pool = cands.length ? cands : cover.palette;
   const warmScore = (c: { h: number }) => 1 - Math.min(hueDist(c.h, 35), 180) / 180;
   const bias = (W - 0.5) * 2; // >0 — к тёплым, <0 — к холодным
-  // Площадь цвета важна, но для свечения предпочитаем насыщенные тона кадра.
   const score = (c: PhotoFeatures['palette'][number]) => c.weight + c.s * 0.3 + bias * (warmScore(c) - 0.5) * 0.6;
   return [...pool].sort((x, y) => score(y) - score(x))[0];
+}
+
+/** Цвет подложки под текстом: самый тёмный тон кадра по относительной яркости, приглушённый к ночи. */
+export function shadeColorOf(f: PhotoFeatures) {
+  const darkest = [...f.palette].sort((x, y) => relLuminance(x.hex) - relLuminance(y.hex))[0]?.hex ?? '#0B1020';
+  const [r, g, b] = hexToRgb(darkest);
+  return toHex(r * 0.32 + 5 * 0.68, g * 0.32 + 7 * 0.68, b * 0.32 + 12 * 0.68);
 }
 
 function styleReason(
@@ -341,12 +448,12 @@ function styleReason(
   c: { E: number; D: number; I: number; night: boolean; percussive: boolean; contrast: number; calm: string[]; song: SongProfile | null; photos: number },
 ) {
   if (style === 'kandinsky') {
-    return `Геометрические переклички в духе Кандинского: ${[c.night ? 'ночной сюжет' : null, c.percussive ? `ударные акценты трека (плотность атак ${f2(c.song!.attackDensity)})` : null, `контраст кадра ${f2(c.contrast)}`, `Energy ${Math.round(c.E * 100)}`].filter(Boolean).join(', ')}. Фигуры встают на самые контрастные зоны и вспыхивают на долю.`;
+    return `Геометрические переклички в духе Кандинского: ${[c.night ? 'ночной сюжет' : null, c.percussive ? `ударные акценты трека (плотность атак ${f2(c.song!.attackDensity)})` : null, `контраст кадра ${f2(c.contrast)}`, `Energy ${Math.round(c.E * 100)}`].filter(Boolean).join(', ')}. Линии идут от самой светлой области кадра и вспыхивают на долю.`;
   }
   if (style === 'impressionism') {
-    return `Рассеянный свет в духе импрессионизма: ${[c.calm.length ? `спокойные слова ${quote(c.calm)}` : null, `мягкий контраст ${f2(c.contrast)}`, c.song ? `редкие атаки (${f2(c.song.attackDensity)})` : null, `Energy ${Math.round(c.E * 100)}`].filter(Boolean).join(', ')}. Свет ложится мазками, зерно смягчает края.`;
+    return `Рассеянный свет в духе импрессионизма: ${[c.calm.length ? `спокойные слова ${quote(c.calm)}` : null, `мягкий контраст ${f2(c.contrast)}`, c.song ? `редкие атаки (${f2(c.song.attackDensity)})` : null, `Energy ${Math.round(c.E * 100)}`].filter(Boolean).join(', ')}. Свет ложится мазками там, где он есть в кадре.`;
   }
-  return `Минимализм с воздухом: камерный сюжет (Intimacy ${Math.round(c.I * 100)}), ${c.photos} ${c.photos === 1 ? 'кадр' : c.photos < 5 ? 'кадра' : 'кадров'} и неторопливый рассказ (Density ${Math.round(c.D * 100)}). Много пустого пространства, тонкая рамка.`;
+  return `Минимализм с воздухом: камерный сюжет (Intimacy ${Math.round(c.I * 100)}), ${c.photos} ${plural(c.photos, ['кадр', 'кадра', 'кадров'])} и неторопливый рассказ (Density ${Math.round(c.D * 100)}). Много пустого пространства, тонкая рамка.`;
 }
 
 function pickEffects(a: TextAnalysis, input: GeneratorInput, cover: PhotoFeatures, season: Season, W: number) {
@@ -400,7 +507,10 @@ function pickEffects(a: TextAnalysis, input: GeneratorInput, cover: PhotoFeature
 
 function buildScenes(
   input: GeneratorInput,
-  c: { E: number; D: number; I: number; barMs: number; beatMs: number; rand: () => number; phrases: string[]; finale: string | null },
+  c: {
+    E: number; D: number; I: number; barMs: number; beatMs: number; rand: () => number;
+    phrases: string[]; finale: string | null; musicDrive: boolean; calm: boolean;
+  },
 ): Scene[] {
   const n = input.photos.length;
   const coverIdx = Math.min(input.coverIndex, n - 1);
@@ -422,47 +532,80 @@ function buildScenes(
   const sceneCount = 2 + middleCount;
   const target = lerp(27000, 16000, c.E);
   // Длина сцен кратна такту; общая длительность держится в пределах 15–30 с.
-  const bars: number[] = Array.from({ length: sceneCount }, () => Math.max(1, Math.round(target / sceneCount / c.barMs)));
-  const total = () => bars.reduce((s, b) => s + b, 0) * c.barMs;
+  const barCount: number[] = Array.from({ length: sceneCount }, () => Math.max(1, Math.round(target / sceneCount / c.barMs)));
+  const total = () => barCount.reduce((s, b) => s + b, 0) * c.barMs;
   let guard = 0;
   while (total() > 30000 && guard++ < 40) {
-    const i = bars.indexOf(Math.max(...bars));
-    if (bars[i] <= 1) break;
-    bars[i]--;
+    const i = barCount.indexOf(Math.max(...barCount));
+    if (barCount[i] <= 1) break;
+    barCount[i]--;
   }
   guard = 0;
   while (total() < 15000 && guard++ < 40) {
-    // Удлиняем в первую очередь середину истории.
-    const mids = bars.slice(1, -1);
+    const mids = barCount.slice(1, -1);
     const i = 1 + mids.indexOf(Math.min(...mids));
-    bars[i]++;
+    barCount[i]++;
+  }
+  // Финал оставляет время прочесть фразу: ~1,8 с + 0,33 с на слово.
+  const readMs = c.finale ? 1800 + countWords(c.finale) * 330 : 0;
+  guard = 0;
+  while (barCount[sceneCount - 1] * c.barMs < readMs && guard++ < 10) {
+    if (total() + c.barMs <= 30000) barCount[sceneCount - 1]++;
+    else {
+      const mids = barCount.slice(1, -1);
+      const i = 1 + mids.indexOf(Math.max(...mids));
+      if (barCount[i] <= 1) break;
+      barCount[i]--;
+      barCount[sceneCount - 1]++;
+    }
   }
 
   const amp = 0.3 + c.E * 0.7;
   const closeScale = 1.12 + c.I * 0.12;
   const dirSign = c.rand() > 0.5 ? 1 : -1;
-  const captions = [...c.phrases];
-  const midCaptions = captions.slice(0, Math.min(2, middleCount));
+  const midCaptions = c.phrases.slice(0, Math.min(2, middleCount));
+  const cutMs = Math.round(c.beatMs / 3);
 
-  const scenes: Scene[] = [];
-  let t = 0;
   const makeShots = (photoIdxs: number[], start: number, dur: number, kind: Scene['kind']): Shot[] => {
-    const beats = Math.max(photoIdxs.length, Math.round(dur / c.beatMs));
+    // Энергичный трек дробит середину на подкадры по атакам (1–2 такта), не меняя композицию.
+    const units: number[] = [];
+    if (kind === 'middle' && c.musicDrive) {
+      const step = c.E > 0.6 ? 1 : 2;
+      const totalBars = Math.max(1, Math.round(dur / c.barMs));
+      const per = Math.max(1, Math.floor(totalBars / step / photoIdxs.length));
+      photoIdxs.forEach((p) => {
+        for (let k = 0; k < per; k++) units.push(p);
+      });
+    } else units.push(...photoIdxs);
+    const beats = Math.max(units.length, Math.round(dur / c.beatMs));
     const shots: Shot[] = [];
     let s = start;
-    photoIdxs.forEach((pi, k) => {
-      const shotBeats = k === photoIdxs.length - 1 ? beats - Math.floor(beats / photoIdxs.length) * k : Math.floor(beats / photoIdxs.length);
-      const end = k === photoIdxs.length - 1 ? start + dur : s + shotBeats * c.beatMs;
-      const target = detailTarget(input.photos[pi]);
+    units.forEach((pi, k) => {
+      const shotBeats = Math.floor(beats / units.length);
+      const end = k === units.length - 1 ? start + dur : s + shotBeats * c.beatMs;
+      const f = input.photos[pi];
+      const tgt = detailTarget(f, k);
+      const open = f.openness ?? 0;
       let shot: Shot;
       if (kind === 'opening') {
-        shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: 1.0, toScale: 1 + 0.06 * amp, fromX: 0, toX: 0, fromY: 0, toY: 0 };
+        if (open >= 0.45) {
+          // Открытое пространство — медленная панорама почти без увеличения.
+          const pan = 2.2 + amp * 1.6;
+          shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: 1.07, toScale: 1.08, fromX: -dirSign * pan, toX: dirSign * pan, fromY: 0, toY: 0, camera: 'pan' };
+        } else if (n === 1 && c.E < 0.35) {
+          shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: 1.0, toScale: 1.0, fromX: 0, toX: 0, fromY: 0, toY: 0, camera: 'hold' };
+        } else {
+          shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: 1.0, toScale: 1 + 0.05 * amp, fromX: 0, toX: 0, fromY: 0, toY: 0, camera: 'push' };
+        }
       } else if (kind === 'finale') {
-        shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: closeScale, toScale: 1.0, fromX: target.x * (closeScale - 1) * 50, toX: 0, fromY: target.y * (closeScale - 1) * 50, toY: 0 };
+        // Выдержка: камера почти стоит, чтобы прочесть фразу.
+        const sc = n === 1 ? closeScale : 1.04;
+        shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: sc, toScale: n === 1 ? 1.0 : 1.02, fromX: tgt.x * (sc - 1) * 50, toX: n === 1 ? 0 : tgt.x * 0.4, fromY: tgt.y * (sc - 1) * 50, toY: 0, camera: n === 1 ? 'pull' : 'hold' };
       } else {
         const sc = closeScale + (k % 2) * 0.04;
         const fx = (k % 2 === 0 ? -dirSign : dirSign) * 2 * amp;
-        shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: 1.04, toScale: sc, fromX: fx, toX: target.x * (sc - 1) * 50, fromY: 0, toY: target.y * (sc - 1) * 50 };
+        shot = { photoIndex: pi, startMs: s, endMs: end, fromScale: 1.04, toScale: sc, fromX: fx, toX: tgt.x * (sc - 1) * 50, fromY: 0, toY: tgt.y * (sc - 1) * 50, camera: 'push' };
+        if (k > 0 && units[k - 1] === pi) shot.cutMs = cutMs;
       }
       shots.push(roundShot(shot));
       s = end;
@@ -470,24 +613,50 @@ function buildScenes(
     return shots;
   };
 
-  const openDur = bars[0] * c.barMs;
-  scenes.push({ kind: 'opening', startMs: 0, durationMs: Math.round(openDur), bars: bars[0], caption: null, shots: makeShots([coverIdx], 0, openDur, 'opening') });
+  const scenes: Scene[] = [];
+  let t = 0;
+  const openDur = barCount[0] * c.barMs;
+  scenes.push({ kind: 'opening', startMs: 0, durationMs: Math.round(openDur), bars: barCount[0], caption: null, shots: makeShots([coverIdx], 0, openDur, 'opening') });
   t = openDur;
   groups.forEach((g, i) => {
-    const dur = bars[i + 1] * c.barMs;
-    scenes.push({ kind: 'middle', startMs: Math.round(t), durationMs: Math.round(dur), bars: bars[i + 1], caption: midCaptions[i] ?? null, shots: makeShots(g, t, dur, 'middle') });
+    const dur = barCount[i + 1] * c.barMs;
+    scenes.push({ kind: 'middle', startMs: Math.round(t), durationMs: Math.round(dur), bars: barCount[i + 1], caption: midCaptions[i] ?? null, shots: makeShots(g, t, dur, 'middle') });
     t += dur;
   });
-  const finDur = bars[bars.length - 1] * c.barMs;
-  scenes.push({ kind: 'finale', startMs: Math.round(t), durationMs: Math.round(finDur), bars: bars[bars.length - 1], caption: c.finale, shots: makeShots([finaleIdx], t, finDur, 'finale') });
+  const finDur = barCount[sceneCount - 1] * c.barMs;
+  scenes.push({ kind: 'finale', startMs: Math.round(t), durationMs: Math.round(finDur), bars: barCount[sceneCount - 1], caption: c.finale, shots: makeShots([finaleIdx], t, finDur, 'finale') });
+
+  placeText(scenes, input.photos);
   return scenes;
 }
 
-/** Направление к самой детальной ячейке кадра (−1..1 по осям). */
-function detailTarget(p: PhotoFeatures) {
-  const g = p.detailGrid;
-  let best = 4;
-  for (let i = 0; i < 9; i++) if (g[i] > g[best]) best = i;
+/**
+ * Сторона подписи и подложка для каждой сцены. Подпись меняет сторону только при заметной пользе (> 0,12),
+ * подложка — минимальная, при которой белый текст даёт 4,5:1 по светлым участкам зоны.
+ */
+export function placeText(scenes: Scene[], photos: PhotoFeatures[]) {
+  let prev: 'left' | 'right' | null = null;
+  for (const s of scenes) {
+    const f = photos[s.shots[0].photoIndex];
+    const cl = zoneCost(zoneOf(f, 'left'));
+    const cr = zoneCost(zoneOf(f, 'right'));
+    let side: 'left' | 'right' = prev ?? (f.zones ? (cl <= cr ? 'left' : 'right') : freeSide(f).side);
+    const other: 'left' | 'right' = side === 'left' ? 'right' : 'left';
+    if (prev && zoneCost(zoneOf(f, other)) < zoneCost(zoneOf(f, side)) - 0.12) side = other;
+    const shadeColor = shadeColorOf(f);
+    const { alpha, ratio } = shadeFor(zoneOf(f, side).p90, relLuminance(shadeColor), TARGET_NORMAL);
+    s.textSide = side;
+    s.shade = alpha;
+    s.shadeColor = shadeColor;
+    s.contrast = ratio;
+    prev = side;
+  }
+}
+
+/** Направление к самой детальной ячейке кадра (−1..1 по осям); k — следующий по детальности для подкадров. */
+function detailTarget(p: PhotoFeatures, k = 0) {
+  const ranked = p.detailGrid.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v || a.i - b.i);
+  const best = ranked[k % 2 === 0 ? 0 : Math.min(1, ranked.length - 1)].i;
   const cx = (best % 3) - 1;
   const cy = Math.floor(best / 3) - 1;
   return { x: -cx, y: -cy };

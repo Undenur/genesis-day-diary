@@ -17,6 +17,9 @@ export interface DiffRow {
   changed: boolean;
 }
 
+const LEAD = { light: 'свет', geometry: 'геометрия', air: 'воздух', texture: 'фактура' } as const;
+const midShots = (g: Generation) => g.scenes.filter((x) => x.kind === 'middle').reduce((n, x) => n + x.shots.length, 0);
+
 const s = (ms: number) => (ms / 1000).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' с';
 
 export function diffGenerations(a: Generation, b: Generation): DiffRow[] {
@@ -33,6 +36,9 @@ export function diffGenerations(a: Generation, b: Generation): DiffRow[] {
     ['Nostalgia', String(a.params.nostalgia), String(b.params.nostalgia)],
     ['Intimacy', String(a.params.intimacy), String(b.params.intimacy)],
     ['Приём', STYLE[a.art.style], STYLE[b.art.style]],
+    ['Ведущий слой', LEAD[a.art.lead ?? 'light'], LEAD[b.art.lead ?? 'light']],
+    ['Пульс', a.art.pulseMode === 'attack' ? 'по атакам трека' : 'спокойное дыхание', b.art.pulseMode === 'attack' ? 'по атакам трека' : 'спокойное дыхание'],
+    ['Кадров в середине', String(midShots(a)), String(midShots(b))],
     ['Эффекты', a.art.effects.map((e) => EFFECT[e]).join(', ') || '—', b.art.effects.map((e) => EFFECT[e]).join(', ') || '—'],
     ['Амплитуда свечения', `${Math.round(a.art.glowAmp * 100)}%`, `${Math.round(b.art.glowAmp * 100)}%`],
     ['Движение камеры', `${Math.round(a.art.motionAmp * 100)}%`, `${Math.round(b.art.motionAmp * 100)}%`],

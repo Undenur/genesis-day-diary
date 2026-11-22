@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildSongProfile } from '../engine/audioAnalysis';
 import { analyzeText } from '../engine/textAnalysis';
-import { fitWords } from '../engine/title';
+import { fitWords, suggestTitle } from '../engine/title';
+import { mapDraftStep } from '../store/draft';
 import { homeEvent, onThisDay, remaining, searchMemories, songLibrary } from './queries';
 import type { CountdownEvent, Memory } from './types';
 import { countWords, titleWordStatus, typo } from './util';
@@ -46,6 +47,9 @@ describe('поиск архива', () => {
     expect(searchMemories(list, { ...f, q: 'июль' }).map((m) => m.id)).toEqual(['a']);
     expect(searchMemories(list, { ...f, year: '2025', month: '11' }).map((m) => m.id)).toEqual(['b']);
     expect(searchMemories(list, { ...f, q: 'высота' }).map((m) => m.id)).toEqual(['a']);
+    // по началу слова, а не по случайной подстроке («лед» внутри «последним»)
+    const tricky = [mem('c', '2025-01-01', { text: 'Последним запомнился запах' }), mem('d', '2025-01-02', { text: 'Ледяной ветер' })];
+    expect(searchMemories(tricky, { ...f, q: 'лёд' }).map((m) => m.id)).toEqual(['d']);
   });
   it('библиотека песен связывает трек с днями', () => {
     const lib = songLibrary([...list, mem('c', '2026-01-01', { song: list[0].song })]);
@@ -81,6 +85,20 @@ describe('названия 2/3/7/8 слов', () => {
     expect(countWords(fitWords('Каток', a, 'winter'))).toBeGreaterThanOrEqual(3);
     expect(countWords(fitWords('Один два три четыре пять шесть семь восемь девять', a, 'winter'))).toBe(7);
   });
+  it('дополнение не повторяет сезон, который уже есть в названии', () => {
+    const a = analyzeText('Тишина и белый свет.');
+    expect(fitWords('Осеннее озеро', a, 'autumn')).toBe('Осеннее озеро в тот день');
+    const t = 'Первый лёд на озере, тишина и белый свет.';
+    // Генератор передаёт сезон из слов текста («лёд» → зима), а не из месяца.
+    expect(suggestTitle(t, analyzeText(t), 'winter').title).toBe('Зимнее озеро и лёд');
+    expect(analyzeText(t).seasonHits.map((h) => h.season)).toContain('winter');
+  });
+
+  it('черновики семишагового мастера открываются на соответствующем шаге', () => {
+    expect([0, 1, 2, 3, 4, 5, 6].map((s) => mapDraftStep(s))).toEqual([0, 0, 0, 1, 2, 2, 3]);
+    expect(mapDraftStep(2, 2)).toBe(2);
+  });
+
   it('имя рядом распознаётся', () => {
     expect(analyzeText('Гуляли по парку с Машей').people.map((p) => p.entry.phrase)).toContain('с Машей');
   });

@@ -54,12 +54,12 @@ export default function PreviewScreen() {
         input={input}
         generation={generation}
         onClose={() => {
-          setStep(6);
+          setStep(3);
           nav('/create/relive');
         }}
         actions={
           <>
-            <Button variant="outline" icon={Undo2} onClick={() => { setStep(1); nav('/create/relive'); }} aria-label="Вернуться к исходным данным" className="flex-none px-3">
+            <Button variant="outline" icon={Undo2} onClick={() => { setStep(0); nav('/create/relive'); }} aria-label="Вернуться к исходным данным" className="flex-none px-3">
               <span className="hidden sm:inline">К данным</span>
             </Button>
             <Button variant="secondary" icon={Pencil} onClick={() => { setTitle(generation.title); setEditTitle(true); }} className="flex-none px-3" aria-label="Изменить название">

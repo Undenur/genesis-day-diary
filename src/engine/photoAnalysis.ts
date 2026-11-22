@@ -40,6 +40,7 @@ export function analyzePixels(data: Uint8ClampedArray, w: number, h: number, ori
   // Карта деталей: средняя величина градиента в каждой из 9 ячеек.
   const grid = new Array(9).fill(0);
   const counts = new Array(9).fill(0);
+  const edge = new Float32Array(n);
   let edgeSum = 0;
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
@@ -47,6 +48,7 @@ export function analyzePixels(data: Uint8ClampedArray, w: number, h: number, ori
       const gx = lum[i + 1] - lum[i - 1];
       const gy = lum[i + w] - lum[i - w];
       const mag = Math.sqrt(gx * gx + gy * gy);
+      edge[i] = mag;
       edgeSum += mag;
       const cell = Math.min(2, Math.floor((y / h) * 3)) * 3 + Math.min(2, Math.floor((x / w) * 3));
       grid[cell] += mag;
@@ -81,10 +83,58 @@ export function analyzePixels(data: Uint8ClampedArray, w: number, h: number, ori
       bottom: round2(regionBrightness.bottom),
       top: round2(regionBrightness.top),
     },
+    zones: textZones(lum, edge, w, h, origW / origH, maxCell),
+    light: lightSource(lum, w, h),
+    openness: round2(clamp((1 - (detailGrid[0] + detailGrid[1] + detailGrid[2]) / 3) * 0.6 + regionBrightness.top * 0.5 - contrast * 0.15)),
   };
 }
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
+const round3 = (v: number) => Math.round(v * 1000) / 1000;
+const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+/** Видимая часть кадра в сцене 9:16 (object-cover): доли ширины и высоты, по центру. */
+export function visibleCrop(aspect: number, stage = 9 / 16) {
+  return aspect > stage ? { w: stage / aspect, h: 1 } : { w: 1, h: aspect / stage };
+}
+
+/**
+ * Зоны подписи: нижние 42% видимой части, левая и правая 62% ширины.
+ * Яркость — в линейной шкале (для расчёта контраста), детали — в шкале detailGrid.
+ */
+function textZones(lum: Float32Array, edge: Float32Array, w: number, h: number, aspect: number, maxCell: number) {
+  const crop = visibleCrop(aspect);
+  const x0 = (1 - crop.w) / 2;
+  const y0 = (1 - crop.h) / 2;
+  const zone = (fx0: number, fx1: number) => {
+    const xa = Math.floor((x0 + crop.w * fx0) * w);
+    const xb = Math.ceil((x0 + crop.w * fx1) * w);
+    const ya = Math.floor((y0 + crop.h * 0.58) * h);
+    const yb = Math.ceil((y0 + crop.h) * h);
+    const vals: number[] = [];
+    let e = 0;
+    for (let y = Math.max(1, ya); y < Math.min(h - 1, yb); y++) {
+      for (let x = Math.max(1, xa); x < Math.min(w - 1, xb); x++) {
+        vals.push(lin(lum[y * w + x]));
+        e += edge[y * w + x];
+      }
+    }
+    if (!vals.length) return { p90: 0.2, mean: 0.2, detail: 0.5 };
+    const sorted = [...vals].sort((a, b) => a - b);
+    const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
+    return { p90: round3(sorted[Math.floor(sorted.length * 0.9)]), mean: round3(mean), detail: round2(clamp(e / vals.length / maxCell)) };
+  };
+  return { left: zone(0, 0.62), right: zone(0.38, 1) };
+}
+
+/** Самая светлая ячейка 3×3 — направление света в кадре. */
+function lightSource(lum: Float32Array, w: number, h: number) {
+  const cells = Array.from({ length: 9 }, (_, i) => regionMean(lum, w, h, (i % 3) / 3, Math.floor(i / 3) / 3, (i % 3) / 3 + 1 / 3, Math.floor(i / 3) / 3 + 1 / 3));
+  const mean = cells.reduce((s, v) => s + v, 0) / 9;
+  let best = 0;
+  cells.forEach((v, i) => v > cells[best] && (best = i));
+  return { x: round2(((best % 3) + 0.5) / 3), y: round2((Math.floor(best / 3) + 0.5) / 3), strength: round2(clamp((cells[best] - mean) * 3)) };
+}
 
 function regionMean(lum: Float32Array, w: number, h: number, x0: number, y0: number, x1: number, y1: number) {
   let s = 0;

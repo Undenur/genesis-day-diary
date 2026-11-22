@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useBlobUrl, useBlobUrls } from '../../hooks/useBlobUrl';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import type { Generation, MemoryInput } from '../../lib/types';
+import { stopAllAudio } from '../../services/audioOwner';
 import { speak, stopSpeaking } from '../../services/speech';
 import { StoryAudio, type AudioStatus } from '../../services/storyAudio';
 import { useSettings } from '../../store/settings';
@@ -24,9 +25,13 @@ interface Props {
   actions?: ReactNode;
   /** Компактный режим для предпросмотра на широком экране */
   side?: ReactNode;
+  /** Начать воспроизведение сразу (переход по кнопке «Смотреть») */
+  autoplay?: boolean;
+  /** Имя для плавного перехода из карточки (View Transitions) */
+  transitionName?: string;
 }
 
-export function Player({ input, generation: g, onClose, actions, side }: Props) {
+export function Player({ input, generation: g, onClose, actions, side, autoplay, transitionName }: Props) {
   const reduced = useReducedMotion();
   const { musicVolume, voiceVolume, set: setSettings } = useSettings();
   const photoIds = useMemo(() => input.photos.map((p) => p.blobId), [input.photos]);
@@ -47,23 +52,41 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
   const [sound, setSound] = useState(false);
   const [gallery, setGallery] = useState(false);
   const [status, setStatus] = useState<AudioStatus | null>(null);
+  const [version, setVersion] = useState(0);
   const audioRef = useRef<StoryAudio | null>(null);
+  const autoStarted = useRef(false);
+
+  // Открытие истории останавливает предпрослушивание (даже если его файл ещё грузится).
+  useEffect(() => {
+    stopAllAudio();
+  }, []);
 
   // Аудио пересоздаётся при смене файлов; закрывается при выходе.
   const fileReady = input.song?.source !== 'file' || !input.song.fileBlobId || fileUrl;
   const voiceReady = !input.voice || voiceUrl;
   useEffect(() => {
     if (!fileReady || !voiceReady) return;
-    const a = new StoryAudio(input.song, g.song, fileUrl, voiceUrl, Math.round(60000 / g.beatMs), g.inputHash);
+    const a = new StoryAudio({
+      song: input.song,
+      profile: g.song,
+      fileUrl,
+      voiceUrl,
+      fallbackBpm: Math.round(60000 / g.beatMs),
+      seedText: g.inputHash,
+      getPositionMs: () => clock.current,
+      onPreempt: () => setPlaying(false),
+    });
     a.setVolumes(musicVolume, voiceVolume);
     a.onVoiceEnd = () => setVoicePlaying(false);
     audioRef.current = a;
     setStatus(a.status);
-    a.prepare().then(setStatus);
+    a.prepare().then((s) => audioRef.current === a && setStatus({ ...s }));
     return () => {
       a.destroy();
-      audioRef.current = null;
+      if (audioRef.current === a) audioRef.current = null;
       stopSpeaking();
+      setSpeaking(false);
+      setVoicePlaying(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileUrl, voiceUrl, fileReady, voiceReady, g.inputHash]);
@@ -76,22 +99,22 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
   }, [musicOn]);
 
   // Часы истории
+  // В Reduced Motion часы стоят: сцены листаются вручную, звук играет.
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || reduced) return;
     let last = performance.now();
     let raf = 0;
     const tick = (now: number) => {
       const dt = now - last;
       last = now;
-      if (!reduced) {
-        clock.current += dt;
-        if (clock.current >= g.totalMs) {
-          clock.current = g.totalMs - 1;
-          setPlaying(false);
-          setEnded(true);
-          audioRef.current?.pause();
-          return;
-        }
+      clock.current += dt;
+      if (clock.current >= g.totalMs) {
+        clock.current = g.totalMs - 1;
+        setPlaying(false);
+        setEnded(true);
+        setVersion((v) => v + 1);
+        audioRef.current?.pause();
+        return;
       }
       raf = requestAnimationFrame(tick);
     };
@@ -99,15 +122,23 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
     return () => cancelAnimationFrame(raf);
   }, [playing, reduced, g.totalMs]);
 
+  const stopSpeech = useCallback(() => {
+    stopSpeaking();
+    setSpeaking(false);
+    audioRef.current?.duck('speech', false);
+  }, []);
+
   const play = useCallback(async () => {
     if (ended) {
       clock.current = 0;
       setEnded(false);
+      setVersion((v) => v + 1);
     }
     setPlaying(true);
+    const a = audioRef.current;
     try {
-      await audioRef.current?.play(clock.current);
-      if (audioRef.current) setStatus({ ...audioRef.current.status });
+      await a?.play(clock.current);
+      if (a && audioRef.current === a) setStatus({ ...a.status });
     } catch {
       toast('Звук не запустился. Проверьте громкость устройства.', 'warn');
     }
@@ -116,13 +147,26 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
   const pause = useCallback(() => {
     setPlaying(false);
     audioRef.current?.pause();
-  }, []);
+    stopSpeech();
+  }, [stopSpeech]);
+
+  // Автозапуск после входа по кнопке «Смотреть» — когда звук готов.
+  useEffect(() => {
+    if (autoplay && status && !autoStarted.current) {
+      autoStarted.current = true;
+      play();
+    }
+  }, [autoplay, status, play]);
 
   const goScene = useCallback(
     (i: number) => {
       const idx = Math.max(0, Math.min(g.scenes.length - 1, i));
-      clock.current = g.scenes[idx].startMs + 1;
+      // Ставим часы после окончания перехода: на паузе кадр сцены виден целиком, без застывшей смеси.
+      const s = g.scenes[idx];
+      const tr = s.shots[0]?.cutMs ?? g.art.transitionMs;
+      clock.current = idx === 0 ? 1 : Math.min(s.startMs + tr / 2 + 1, s.startMs + s.durationMs - 1);
       setEnded(false);
+      setVersion((v) => v + 1);
       audioRef.current?.seek(clock.current);
     },
     [g.scenes],
@@ -130,22 +174,23 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
 
   const prev = useCallback(() => {
     const s = g.scenes[scene];
-    if (clock.current - s.startMs > 1200 && !reduced) goScene(scene);
+    if (clock.current - s.startMs > 1200 + g.art.transitionMs / 2 && !reduced) goScene(scene);
     else goScene(scene - 1);
   }, [g.scenes, scene, goScene, reduced]);
   const next = useCallback(() => {
     if (scene >= g.scenes.length - 1) {
       clock.current = g.totalMs - 1;
       setEnded(true);
+      setVersion((v) => v + 1);
       pause();
     } else goScene(scene + 1);
   }, [scene, g.scenes.length, g.totalMs, goScene, pause]);
 
   const close = useCallback(() => {
     audioRef.current?.pause();
-    stopSpeaking();
+    stopSpeech();
     onClose();
-  }, [onClose]);
+  }, [onClose, stopSpeech]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -186,20 +231,29 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
 
   const toggleSpeak = async () => {
     if (speaking) {
-      stopSpeaking();
-      setSpeaking(false);
+      stopSpeech();
       return;
     }
+    const a = audioRef.current;
     try {
       setSpeaking(true);
-      await speak(input.text, g, () => setSpeaking(false));
+      await speak(
+        input.text,
+        g,
+        () => {
+          setSpeaking(false);
+          a?.duck('speech', false);
+        },
+        () => a?.duck('speech', true),
+      );
     } catch (e) {
       setSpeaking(false);
+      a?.duck('speech', false);
       toast((e as Error).message, 'warn');
     }
   };
 
-  const levelFn = useCallback(() => audioRef.current?.level() ?? 0, []);
+  const beat = useCallback(() => audioRef.current?.probe() ?? { sec: null, level: 0 }, []);
   const onScene = useCallback((i: number) => setScene(i), []);
 
   return (
@@ -213,7 +267,10 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
           placeName={input.place?.name}
           artistic={artistic}
           clock={clock}
-          levelFn={levelFn}
+          beat={beat}
+          running={playing && !reduced}
+          version={version}
+          transitionName={transitionName}
           still={reduced}
           ended={ended}
           onReplay={play}
@@ -240,7 +297,7 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
             {reduced && <span className="shrink-0 rounded-full bg-raised px-2.5 py-1 text-ink">Reduced Motion · ручной просмотр</span>}
           </div>
           <div className="flex items-center justify-between gap-1">
-            <IconButton icon={Contrast} label={artistic ? 'Показать оригинал' : 'Показать арт-версию'} active={!artistic} onClick={() => setArtistic((v) => !v)} />
+            <IconButton icon={Contrast} label={artistic ? 'Показать оригинал' : 'Показать арт-версию'} active={!artistic} onClick={() => setArtistic((v) => !v)} aria-pressed={!artistic} />
             <IconButton icon={ChevronLeft} label="Предыдущая сцена" onClick={prev} />
             <button
               type="button"
@@ -307,7 +364,7 @@ export function Player({ input, generation: g, onClose, actions, side }: Props) 
               {speaking ? 'Остановить чтение' : 'Прочитать запись'}
             </button>
           </div>
-          <p className="text-[12.5px] text-muted">Голос автора — оригинальная запись. «Прочитать запись» использует системный синтез речи. Пока звучит голос, музыка приглушается до 25%.</p>
+          <p className="text-[12.5px] text-muted">Голос автора — оригинальная запись. «Прочитать запись» использует системный синтез речи. Пока звучит речь, музыка плавно приглушается до 25% и возвращается после.</p>
         </div>
       </Sheet>
 

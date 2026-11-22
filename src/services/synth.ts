@@ -322,6 +322,11 @@ export class SynthEngine {
     this.timer = setInterval(tick, 40);
   }
 
+  /** Позиция в композиции, с (сетка долей начинается с нуля). */
+  position() {
+    return Math.max(0, this.ctx.currentTime - this.t0);
+  }
+
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;

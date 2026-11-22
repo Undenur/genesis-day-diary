@@ -18,6 +18,12 @@ interface DataState {
 
 let initPromise: Promise<void> | null = null;
 
+/** Другие открытые вкладки перечитывают данные после изменений в этой. */
+const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('momenta-data') : null;
+function notifyTabs() {
+  channel?.postMessage('changed');
+}
+
 export const useData = create<DataState>()((set, get) => ({
   memories: [],
   countdowns: [],
@@ -34,8 +40,13 @@ export const useData = create<DataState>()((set, get) => ({
         if (!seeded) {
           set({ status: 'seeding' });
           const { seedDemos } = await import('../services/demo');
-          // Каждый готовый демо-день сразу появляется в архиве.
-          await seedDemos(() => get().reload());
+          // Каждый готовый демо-день сразу появляется в архиве — и в других открытых вкладках.
+          await seedDemos({
+            onDay: async () => {
+              await get().reload();
+              notifyTabs();
+            },
+          });
           await get().reload();
         }
         set({ status: 'ready' });
@@ -54,19 +65,27 @@ export const useData = create<DataState>()((set, get) => ({
   saveMemory: async (m, opts) => {
     await store.saveMemoryAtomic(m, opts);
     await get().reload();
+    notifyTabs();
   },
   removeMemory: async (id) => {
     await store.deleteMemory(id);
     // Событие Countdown, из которого создан день, снова предлагает создать воспоминание.
     for (const c of get().countdowns.filter((c) => c.memoryId === id)) await store.saveCountdown({ ...c, memoryId: null });
     await get().reload();
+    notifyTabs();
   },
   saveCountdown: async (c) => {
     await store.saveCountdown(c);
     await get().reload();
+    notifyTabs();
   },
   removeCountdown: async (id) => {
     await store.deleteCountdown(id);
     await get().reload();
+    notifyTabs();
   },
 }));
+
+channel?.addEventListener('message', () => {
+  if (useData.getState().status !== 'idle') useData.getState().reload();
+});

@@ -44,6 +44,8 @@ export interface AudioFeatures {
   bpmConfidence: number;
   /** Разница громких и тихих мест, дБ */
   dynamicRangeDb: number;
+  /** Смещение первой сильной доли от начала файла, с (нет у записей до версии 1.1) */
+  beatOffsetSec?: number;
 }
 
 export type ValueSource = 'manual' | 'measured' | 'description' | 'default';
@@ -61,6 +63,9 @@ export interface SongProfile {
   scaleSource: ValueSource;
   texture: SynthTexture;
   softness: number;
+  /** Есть ли реальный сигнал (файл измерен) */
+  measured?: boolean;
+  beatOffsetSec?: number;
   year?: number;
   notes: string[];
 }
@@ -90,6 +95,21 @@ export interface PhotoFeatures {
   activity: number;
   /** Яркость левой/правой/нижней трети для затемнения под текстом */
   regionBrightness: { left: number; right: number; bottom: number; top: number };
+  /**
+   * Зоны подписи в видимой части кадра 9:16 (после object-cover). p90 — светлые участки
+   * в линейной яркости, detail — средний перепад. Нет у снимков, проанализированных до версии 1.1.
+   */
+  zones?: { left: TextZone; right: TextZone };
+  /** Самая светлая ячейка 3×3 — откуда «идёт свет» (0..1 по осям) */
+  light?: { x: number; y: number; strength: number };
+  /** Открытое пространство: мало деталей и светлая верхняя треть, 0..1 */
+  openness?: number;
+}
+
+export interface TextZone {
+  p90: number;
+  mean: number;
+  detail: number;
 }
 
 export interface PhotoRef {
@@ -164,7 +184,23 @@ export interface ArtDirection {
   captionAlign: 'left' | 'right';
   shadeStrength: number;
   photoFilter: string;
+  /* Поля версии 1.1 — необязательны, у старых дней берутся значения по умолчанию. */
+  /** Главный выразительный приём кадра; остальные ограничены по силе */
+  lead?: ArtLead;
+  /** Сила слоёв 0..1, плавно зависит от Emotion DNA */
+  intensity?: { light: number; geometry: number; air: number; effects: number };
+  /** Откуда идёт свет (самая светлая область обложки) */
+  light?: { x: number; y: number };
+  /** Пульс по атакам реального звука или спокойное «дыхание» */
+  pulseMode?: 'attack' | 'breath';
+  beatOffsetMs?: number;
+  /** Сила затемнения краёв: светлому кадру — воздух, тёмному — глубина */
+  vignette?: number;
+  /** Сколько свечения допускает кадр (тёмные участки ночного снимка остаются тёмными) */
+  glowRoom?: number;
 }
+
+export type ArtLead = 'light' | 'geometry' | 'air' | 'texture';
 
 export interface Shot {
   photoIndex: number;
@@ -176,6 +212,10 @@ export interface Shot {
   toX: number;
   fromY: number;
   toY: number;
+  /** Характер камеры: общий план с панорамой, наезд на деталь, выдержка для чтения */
+  camera?: 'pan' | 'push' | 'hold' | 'pull';
+  /** Короткий переход на атаке (монтаж на долю) */
+  cutMs?: number;
 }
 
 export interface Scene {
@@ -185,6 +225,18 @@ export interface Scene {
   bars: number;
   caption: string | null;
   shots: Shot[];
+  /** Сторона подписи для этой сцены и подложка под текст (контраст рассчитан) */
+  textSide?: 'left' | 'right';
+  shade?: number;
+  shadeColor?: string;
+  contrast?: number;
+}
+
+/** Короткая причина для «Почему такая атмосфера?» */
+export interface Reason {
+  kind: 'phrase' | 'color' | 'tempo';
+  text: string;
+  color?: string;
 }
 
 export interface Explanation {
@@ -210,6 +262,8 @@ export interface Generation {
   explanations: Explanation[];
   song: SongProfile | null;
   textSummary: TextSummary;
+  /** До трёх главных причин из данных этой записи (версия 1.1+) */
+  reasons?: Reason[];
 }
 
 export interface TextSummary {
@@ -233,6 +287,8 @@ export interface Memory extends MemoryInput {
   generation: Generation;
   visibility: 'private';
   demo?: boolean;
+  /** Устойчивая внутренняя идентичность демо-дня (не зависит от названия) */
+  demoKey?: string;
   createdAt: string;
   updatedAt: string;
 }

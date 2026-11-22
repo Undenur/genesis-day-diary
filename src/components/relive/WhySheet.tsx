@@ -1,8 +1,8 @@
 /** «Почему такая атмосфера?» — объяснение решений генератора с фактическими измерениями этой записи. */
-import { AudioLines, Camera, Gauge, Palette, PenLine, Sparkles } from 'lucide-react';
+import { AudioLines, Camera, Gauge, Palette, PenLine, Quote, Sparkles } from 'lucide-react';
 import { WEIGHTS } from '../../engine/generator';
-import type { Explanation, Generation, ParamKey } from '../../lib/types';
-import { colorName, hexToRgb, rgbToHsl } from '../../lib/util';
+import type { Explanation, Generation, ParamKey, Reason } from '../../lib/types';
+import { colorName, hexToRgb, plural, rgbToHsl } from '../../lib/util';
 import { Sheet } from '../ui';
 
 export const PARAM_LABEL: Record<ParamKey, { name: string; hint: string }> = {
@@ -51,10 +51,50 @@ export function ParamBars({ g, compact }: { g: Generation; compact?: boolean }) 
   );
 }
 
+const REASON_ICON: Record<Reason['kind'], typeof Camera> = { phrase: Quote, color: Palette, tempo: AudioLines };
+
+/** Для дней версии до 1.1 причины собираются из сохранённых объяснений — тех же, что были применены. */
+function reasonsOf(g: Generation): Reason[] {
+  if (g.reasons?.length) return g.reasons;
+  const out: Reason[] = [];
+  const cap = g.explanations.find((e) => e.topic === 'caption' && e.text.startsWith('Подписи'));
+  if (cap) out.push({ kind: 'phrase', text: cap.text });
+  const pal = g.explanations.find((e) => e.topic === 'palette');
+  if (pal) out.push({ kind: 'color', text: pal.text, color: g.art.glowColor });
+  const rhythm = g.explanations.find((e) => e.topic === 'rhythm');
+  if (rhythm) out.push({ kind: 'tempo', text: rhythm.text });
+  return out.slice(0, 3);
+}
+
 export function WhySheet({ open, onClose, g }: { open: boolean; onClose: () => void; g: Generation }) {
+  const reasons = reasonsOf(g);
+  const sourceColor = g.reasons?.find((r) => r.kind === 'color')?.color ?? g.art.glowColor;
   return (
     <Sheet open={open} onClose={onClose} title="Почему такая атмосфера?" wide>
-      <div className="flex flex-col gap-6 pb-2">
+      <div className="flex flex-col gap-5 pb-2">
+        <section aria-label="Главные причины">
+          <ul className="flex flex-col gap-3">
+            {reasons.map((r, i) => {
+              const Icon = REASON_ICON[r.kind];
+              return (
+                <li key={i} className="flex items-start gap-3 rounded-2xl bg-night p-3.5 text-[15px] leading-snug">
+                  {r.color ? (
+                    <span className="mt-0.5 h-7 w-7 shrink-0 rounded-lg ring-1 ring-white/20" style={{ background: r.color }} aria-hidden="true" />
+                  ) : (
+                    <Icon size={22} className="mt-0.5 shrink-0 text-accent" aria-hidden="true" />
+                  )}
+                  <span>{r.text}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+        <details className="group rounded-2xl border border-line px-4 py-3 [&_summary::-webkit-details-marker]:hidden">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 text-[15px] font-semibold">
+            Подробный расчёт
+            <span className="text-[13px] font-normal text-muted group-open:hidden">показать</span>
+          </summary>
+          <div className="mt-3 flex flex-col gap-6">
         <section>
           <h3 className="mb-2 flex items-center gap-2 text-[15px] font-semibold">
             <Sparkles size={18} className="text-accent" aria-hidden="true" /> {STYLE_LABEL[g.art.style]}
@@ -89,7 +129,7 @@ export function WhySheet({ open, onClose, g }: { open: boolean; onClose: () => v
                   <span className="h-6 w-6 rounded-md ring-1 ring-white/15" style={{ background: hex }} aria-hidden="true" />
                   <span>
                     {colorName(h, s, l)} <span className="text-muted">{hex}</span>
-                    {hex === g.art.glowColor && <span className="ml-1 text-accent">· свечение</span>}
+                    {hex === sourceColor && <span className="ml-1 text-accent">· свечение</span>}
                   </span>
                 </li>
               );
@@ -97,8 +137,10 @@ export function WhySheet({ open, onClose, g }: { open: boolean; onClose: () => v
           </ul>
         </section>
         <p className="text-[12px] text-muted">
-          Алгоритм {g.algorithmVersion} · seed {g.seed} · {g.scenes.length} сцены · {(g.totalMs / 1000).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} с. Тот же ввод всегда даёт тот же результат.
+          Алгоритм {g.algorithmVersion} · seed {g.seed} · {g.scenes.length} {plural(g.scenes.length, ['сцена', 'сцены', 'сцен'])} · {(g.totalMs / 1000).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} с. Тот же ввод всегда даёт тот же результат.
         </p>
+          </div>
+        </details>
       </div>
     </Sheet>
   );

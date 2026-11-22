@@ -2,6 +2,7 @@
 import { CalendarClock, Download, ExternalLink, Info, Lock, MapPin, Pencil, Share, Trash } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router';
+import { RELIVE_TRANSITION } from '../components/MemoryCard';
 import { Player } from '../components/relive/Player';
 import { SeasonIcon } from '../components/SeasonIcon';
 import { Button, ConfirmDialog, EmptyState, Sheet, Spinner, toast } from '../components/ui';
@@ -30,14 +31,18 @@ export default function MemoryScreen() {
 
   const fromEvent = countdowns.find((c) => c.memoryId === m.id);
   // После сохранения «назад» вёл бы в пустой мастер — возвращаемся в архив.
-  const fromSave = (location.state as { fromSave?: boolean } | null)?.fromSave;
+  const state = location.state as { fromSave?: boolean; autoplay?: boolean } | null;
+  const fromSave = state?.fromSave;
   const close = () => (window.history.state?.idx > 0 && !fromSave ? nav(-1) : nav('/memories', { replace: !!fromSave }));
 
   return (
     <>
       <Player
+        key={m.id}
         input={m}
         generation={m.generation}
+        autoplay={!!state?.autoplay}
+        transitionName={RELIVE_TRANSITION}
         onClose={close}
         actions={
           <>

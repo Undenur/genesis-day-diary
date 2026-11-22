@@ -100,3 +100,25 @@ input[type='time'] {
     scroll-behavior: auto !important;
   }
 }
+
+/* Переход «карточка → первый кадр истории»: 280 мс, без размытия и теней на весь экран. */
+::view-transition-group(relive-cover) {
+  animation-duration: 280ms;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 200ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
+:root[data-motion='reduce'] ::view-transition-group(*),
+:root[data-motion='reduce'] ::view-transition-old(*),
+:root[data-motion='reduce'] ::view-transition-new(*) {
+  animation: none !important;
+}

@@ -47,6 +47,24 @@ function drawScaled(src: CanvasImageSource, w: number, h: number, maxSide: numbe
 
 /** Проверяет и готовит снимок: уменьшает до 1800 px, делает миниатюру, извлекает признаки. Файлы сразу в IndexedDB. */
 export async function processPhoto(file: Blob, name: string, owner: string, index: number): Promise<PhotoRef> {
+  const p = await preparePhoto(file, name, index);
+  const id = uuid();
+  const blobId = await putBlob(p.full, owner, `img-${id}`);
+  const thumbBlobId = await putBlob(p.thumb, owner, `thumb-${id}`);
+  return { id, blobId, thumbBlobId, name, alt: p.alt, width: p.width, height: p.height, features: p.features };
+}
+
+export interface PreparedPhoto {
+  full: Blob;
+  thumb: Blob;
+  alt: string;
+  width: number;
+  height: number;
+  features: PhotoRef['features'];
+}
+
+/** Подготовка снимка без записи в базу (для атомарной записи вместе с днём). */
+export async function preparePhoto(file: Blob, name: string, index: number): Promise<PreparedPhoto> {
   if (file.size > MAX_IMAGE_BYTES) {
     throw new MediaError(`«${name}» больше 30 МБ (${(file.size / 1048576).toFixed(1)} МБ). Уменьшите снимок и попробуйте снова.`);
   }
@@ -71,10 +89,7 @@ export async function processPhoto(file: Blob, name: string, owner: string, inde
   if ('close' in bmp) bmp.close();
 
   const [fullBlob, thumbBlob] = await Promise.all([canvasToBlob(full, 'image/jpeg', 0.88), canvasToBlob(thumb, 'image/jpeg', 0.82)]);
-  const id = uuid();
-  const blobId = await putBlob(fullBlob, owner, `img-${id}`);
-  const thumbBlobId = await putBlob(thumbBlob, owner, `thumb-${id}`);
-  return { id, blobId, thumbBlobId, name, alt: `Снимок дня ${index + 1}`, width: full.width, height: full.height, features };
+  return { full: fullBlob, thumb: thumbBlob, alt: `Снимок дня ${index + 1}`, width: full.width, height: full.height, features };
 }
 
 /** Копия существующего Blob под новым id (например, обложка Countdown → первое фото дня). */

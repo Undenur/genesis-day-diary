@@ -61,8 +61,11 @@ export function Layout() {
           </div>
         )}
         {status === 'seeding' && (
-          <div className="flex items-center justify-center gap-2 bg-card px-4 py-2 text-[13px]" role="status">
-            <Spinner /> Готовлю три демо-дня: снимки, треки и сцены…
+          // Плавающая плашка: не сдвигает содержимое, пока готовятся демо.
+          <div className="pointer-events-none fixed inset-x-0 bottom-[calc(76px+var(--safe-bottom))] z-50 flex justify-center px-5 lg:bottom-6" role="status">
+            <span className="flex items-center gap-2 rounded-full bg-card/95 px-4 py-2 text-[13px] shadow-xl backdrop-blur">
+              <Spinner /> Готовлю три демо-дня: снимки, треки и сцены…
+            </span>
           </div>
         )}
         {status === 'error' && (

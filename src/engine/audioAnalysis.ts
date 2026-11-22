@@ -76,6 +76,20 @@ export function analyzeSignal(signal: Float32Array, sampleRate: number): AudioFe
   const confidence = clamp(acMax > 0 ? (acMax - acMean) / (Math.abs(acMax) + 0.15) : 0);
   if (confidence < 0.12 || durationSec < 4) bestBpm = null;
 
+  // Смещение сетки долей: фаза, на которую чаще всего приходятся атаки.
+  let beatOffsetSec = 0;
+  if (bestBpm) {
+    const period = (60 / bestBpm) * fps;
+    let bestPhase = 0;
+    let bestSum = -1;
+    for (let ph = 0; ph < period; ph++) {
+      let sum = 0;
+      for (let k = ph; k < frames; k += period) sum += onset[Math.round(k)] || 0;
+      if (sum > bestSum) { bestSum = sum; bestPhase = ph; }
+    }
+    beatOffsetSec = Math.round((bestPhase / fps) * 1000) / 1000;
+  }
+
   const sortedRms = Array.from(rmsArr).sort((a, b) => a - b);
   const p = (q: number) => sortedRms[Math.min(sortedRms.length - 1, Math.floor(q * sortedRms.length))] || 1e-6;
   const db = (v: number) => 20 * Math.log10(Math.max(v, 1e-6));
@@ -93,6 +107,7 @@ export function analyzeSignal(signal: Float32Array, sampleRate: number): AudioFe
     bpm: bestBpm ? Math.round(bestBpm) : null,
     bpmConfidence: Math.round(confidence * 100) / 100,
     dynamicRangeDb,
+    beatOffsetSec,
   };
 }
 
@@ -181,6 +196,8 @@ export function buildSongProfile(song: SongInput): SongProfile {
     scaleSource,
     texture: textureFrom(song.genre, song.mood, energy),
     softness: Math.round(softness * 100) / 100,
+    measured: !!a,
+    beatOffsetSec: a?.beatOffsetSec ?? 0,
     year: song.year,
     notes,
   };

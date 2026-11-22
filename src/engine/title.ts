@@ -89,9 +89,12 @@ export function fitWords(title: string, a: TextAnalysis, season: Season): string
     SEASON_ADVERB[season],
     'в тот день',
   ].filter(Boolean) as string[];
+  // Не повторяем корень, который уже есть в названии («Осеннее озеро осенью»).
+  const stem = (w: string) => w.toLowerCase().replace(/ё/g, 'е').slice(0, 4);
+  const repeats = (pad: string) => pad.split(' ').some((p) => p.length > 3 && words.some((w) => stem(w) === stem(p)));
   let i = 0;
   while (countWords(words.join(' ')) < 3 && i < pads.length) {
-    words.push(...pads[i].split(' '));
+    if (!repeats(pads[i])) words.push(...pads[i].split(' '));
     i++;
   }
   let out = words.join(' ').replace(/[,.;:]+$/, '');

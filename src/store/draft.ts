@@ -6,6 +6,16 @@ import { clearDraft, loadDraft, saveDraft, StorageFullError } from '../services/
 
 export const DRAFT_OWNER = 'draft';
 
+/** Версия последовательности шагов мастера. 1 — семь шагов (до 1.1), 2 — четыре. */
+export const DRAFT_FLOW = 2;
+/** Шаги черновиков из семишаговой версии → новые: дата/история/фото → 0, песня → 1, голос/контекст → 2, сборка → 3. */
+const LEGACY_STEP = [0, 0, 0, 1, 2, 2, 3];
+
+export function mapDraftStep(step: number, flow?: number) {
+  if (flow === DRAFT_FLOW) return Math.min(Math.max(0, step), 3);
+  return LEGACY_STEP[step] ?? 0;
+}
+
 export function emptyInput(prefill: Partial<MemoryInput> = {}): MemoryInput {
   const date = prefill.date ?? todayISO();
   return {
@@ -48,7 +58,7 @@ export const useDraft = create<DraftState>()((set, get) => {
     timer = setTimeout(async () => {
       const s = get();
       try {
-        await saveDraft({ step: s.step, input: s.input, memoryId: s.memoryId, generation: s.generation });
+        await saveDraft({ step: s.step, flow: DRAFT_FLOW, input: s.input, memoryId: s.memoryId, generation: s.generation });
         if (s.saveError) set({ saveError: null });
       } catch (e) {
         set({ saveError: e instanceof StorageFullError ? e.message : 'Черновик не удалось сохранить' });
@@ -67,7 +77,7 @@ export const useDraft = create<DraftState>()((set, get) => {
     load: async () => {
       if (get().loaded) return;
       const d = await loadDraft();
-      if (d) set({ loaded: true, step: d.step, input: { ...emptyInput(), ...d.input }, memoryId: d.memoryId ?? uuid(), generation: d.generation ?? null, restoredAt: d.updatedAt });
+      if (d) set({ loaded: true, step: mapDraftStep(d.step, d.flow), input: { ...emptyInput(), ...d.input }, memoryId: d.memoryId ?? uuid(), generation: d.generation ?? null, restoredAt: d.updatedAt });
       else set({ loaded: true });
     },
     update: (patch) => {
