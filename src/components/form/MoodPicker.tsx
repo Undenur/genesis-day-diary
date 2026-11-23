@@ -123,6 +123,13 @@ export function MoodPicker({ mood, song, text, onChange }: Props) {
               <p className="text-muted">
                 {current ? `${current.emoji} ${current.label}: ${current.hint}` : `Подберу по тексту: ${moodOf(music.mood)!.emoji} ${moodOf(music.mood)!.label}`}
               </p>
+              {/* Атрибуция CC BY 4.0: автор выше, здесь источник, лицензия и изменения */}
+              <p className="mt-0.5 text-[12px] text-muted">
+                <a href={music.track.sourcePage} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-ink">
+                  incompetech.com
+                </a>{' '}
+                · {music.track.license} · фрагмент 36 с, громкость выровнена
+              </p>
             </>
           )}
         </div>

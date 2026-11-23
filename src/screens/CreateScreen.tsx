@@ -25,7 +25,7 @@ export function CreateScreen() {
         <Link to="/create/relive" className="group relative overflow-hidden rounded-[20px] bg-accent p-5 text-night">
           <Layers size={34} aria-hidden="true" />
           <p className="mt-6 text-[20px] font-semibold">Воспоминание RE:LIVE</p>
-          <p className="mt-1 text-[14px] text-night/80">Текст, фото и песня → история на 15–30 секунд</p>
+          <p className="mt-1 text-[14px] text-night/80">Текст, фото и настроение → история на 15–30 секунд</p>
           {hasDraft && <p className="mt-3 inline-block rounded-full bg-night/15 px-3 py-1 text-[13px] font-semibold">Есть черновик — продолжить</p>}
         </Link>
         <Link to="/countdown/new" className="rounded-[20px] bg-card p-5 hover:bg-raised">

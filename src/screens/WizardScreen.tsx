@@ -67,8 +67,8 @@ export default function WizardScreen() {
 
   const showErrors = (e: DayErrors) => {
     setErrors(e);
-    // Фокус — после того как поле отрисует ошибку.
-    requestAnimationFrame(() => focusFirstError(e));
+    // Фокус — после того как поле отрисует ошибку. Не rAF: он не срабатывает в фоновой вкладке.
+    setTimeout(() => focusFirstError(e), 0);
   };
 
   const build = async () => {

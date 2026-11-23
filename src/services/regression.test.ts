@@ -352,11 +352,21 @@ describe('звук без синтеза', () => {
       ps.play('editor', { url: '/audio/km-gymnopedie-1.mp3' }),
       ps.play('editor', { url: '/audio/km-floating-cities.mp3' }),
     ]);
-    await tick(500); // кроссфейд прежнего фрагмента завершён
+    await tick(1000); // кроссфейд прежнего фрагмента завершён (с запасом)
     expect(FakeAudio.all.filter((a) => !a.paused).map((a) => a.src)).toEqual(['/audio/km-floating-cities.mp3']);
     expect(usePreviewSound.getState().playingId).toBe('editor');
     usePreviewSound.getState().stop();
-    await tick(400);
+    await tick(1000); // затухание 320 мс шагами по 30 мс — с запасом на загрузку машины
     expect(playingCount()).toBe(0);
+  });
+});
+
+describe('ритм по реально звучащей ссылке', () => {
+  it('недоступная ссылка не считается играющей; ссылка без CORS, но с метаданными — играет', async () => {
+    const { measureLink } = await import('./pipeline');
+    const fail = () => Promise.reject(new Error('404'));
+    expect(await measureLink('https://example.com/none.mp3', fail, async () => 'error')).toEqual({ audio: null, playable: false });
+    expect(await measureLink('https://example.com/slow.mp3', fail, async () => 'timeout')).toEqual({ audio: null, playable: false });
+    expect(await measureLink('https://cdn.example.com/no-cors.mp3', fail, async () => 'ok')).toEqual({ audio: null, playable: true });
   });
 });

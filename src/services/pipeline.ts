@@ -12,7 +12,7 @@ import { analyzeText } from '../engine/textAnalysis';
 import type { CatalogTrack } from '../lib/catalog';
 import type { AudioFeatures, Generation, Memory, MemoryInput, SongInput } from '../lib/types';
 import { SCHEMA_VERSION, getBlob } from './db';
-import { analyzeAudioBlob } from './media';
+import { analyzeAudioBlob, probeAudioUrl } from './media';
 import { catalogSong, resolveMusic } from './musicSource';
 
 export type ProgressStep = 'text' | 'photos' | 'music' | 'dna' | 'scenes';
@@ -52,6 +52,22 @@ export async function analyzeCatalogTrack(t: CatalogTrack, fetcher: (url: string
   }
 }
 
+/**
+ * Прямая ссылка: если сервер отдаёт файл (тот же источник или CORS) — измеряем сигнал;
+ * иначе проверяем, играет ли она вообще (тайм-аут 8 с), чтобы не считать ритм по несуществующему треку.
+ */
+export async function measureLink(
+  url: string,
+  fetcher: (url: string) => Promise<Blob> = (u) => fetch(u, { signal: AbortSignal.timeout(8000) }).then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status))))),
+  probe: (url: string) => Promise<'ok' | 'error' | 'timeout'> = probeAudioUrl,
+): Promise<{ audio: AudioFeatures | null; playable: boolean }> {
+  try {
+    return { audio: await analyzeAudioBlob(await fetcher(url)), playable: true };
+  } catch {
+    return { audio: null, playable: (await probe(url)) === 'ok' };
+  }
+}
+
 /** Измеряет свой файл, если он ещё не измерен. Ошибку декодирования превращает в пометку. */
 export async function ensureSongAnalysis(song: SongInput | null): Promise<{ song: SongInput | null; warning: string | null }> {
   if (!song || song.source !== 'file' || !song.fileBlobId || song.audio) return { song, warning: null };
@@ -80,7 +96,15 @@ export async function soundingSong(input: MemoryInput) {
     warning = r.warning;
     sounding = r.song ?? catalogSong(music.track);
   } else if (music.kind === 'link') {
-    sounding = input.song!;
+    const link = await measureLink(music.url!);
+    if (link.audio) sounding = { ...input.song!, audio: link.audio };
+    else if (link.playable) sounding = input.song!; // играет, но чужой сервер не отдаёт сигнал: темп — оценка
+    else {
+      // Ссылка не отвечает — в истории прозвучит композиция настроения, по ней и считаем ритм.
+      warning = `Ссылка не отвечает — в истории прозвучит «${music.track.title}» из подборки, ритм рассчитан по ней.`;
+      const audio = await analyzeCatalogTrack(music.track);
+      sounding = { ...catalogSong(music.track), audio: audio ?? undefined };
+    }
   } else {
     const audio = await analyzeCatalogTrack(music.track);
     if (!audio) warning = `Не удалось прослушать «${music.track.title}» — темп оценён по описанию композиции.`;
